@@ -331,7 +331,7 @@ RunService.Heartbeat:Connect(function()
                             prompt:InputHoldEnd()
                         else
                             prompt:InputHoldBegin()
-                            task.wait(prompt.HoldDuration)
+                            task.wait(prompt.HoldDuration + 1)
                             prompt:InputHoldEnd()
                         end
                     end)
