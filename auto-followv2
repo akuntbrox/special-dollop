@@ -1,6 +1,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
 
 local localPlayer = Players.LocalPlayer
 
@@ -29,6 +30,9 @@ local PORTAL_DELAY_BEFORE_USE = 2       -- wait 2s before using a portal
 local MIN_MOVE_AFTER_PORTAL = 20        -- must move this many studs after a portal
                                         -- before any next Portal can auto-fire
 
+-- Run / walk animation
+local RUN_ANIMATION_ID = 507767714      -- your chosen walk/run animation asset id
+
 --------------------------------------------------------
 -- INTERNAL STATE
 --------------------------------------------------------
@@ -44,36 +48,45 @@ local distanceMovedSincePortal = 0      -- how far we’ve moved since last port
 
 local followEnabled = true              -- controlled by GUI toggle
 
--- Walking animation state
-local walkAnimation = Instance.new("Animation")
-walkAnimation.AnimationId = "rbxassetid://507767714" -- classic Roblox walk
-local currentWalkTrack = nil
+--------------------------------------------------------
+-- RUN / WALK ANIMATION HANDLER
+--------------------------------------------------------
 
-local function ensureWalkTrack(humanoid)
+local runTrack = nil
+
+local function setupRunAnimation(humanoid)
     if not humanoid then return end
-    if not currentWalkTrack or currentWalkTrack.Parent ~= humanoid then
-        currentWalkTrack = humanoid:LoadAnimation(walkAnimation)
-        currentWalkTrack.Priority = Enum.AnimationPriority.Movement
-        currentWalkTrack.Looped = true
+    if RUN_ANIMATION_ID == 0 then return end
+
+    -- Already loaded for this humanoid?
+    if runTrack and runTrack.Parent == humanoid then
+        return
+    end
+
+    local anim = Instance.new("Animation")
+    anim.AnimationId = "rbxassetid://" .. RUN_ANIMATION_ID
+
+    runTrack = humanoid:LoadAnimation(anim)
+    runTrack.Priority = Enum.AnimationPriority.Movement
+    runTrack.Looped = true
+end
+
+local function playRunAnimation(humanoid)
+    setupRunAnimation(humanoid)
+    if runTrack and not runTrack.IsPlaying then
+        runTrack:Play()
     end
 end
 
-local function playWalk(humanoid)
-    ensureWalkTrack(humanoid)
-    if currentWalkTrack and not currentWalkTrack.IsPlaying then
-        currentWalkTrack:Play()
+local function stopRunAnimation()
+    if runTrack and runTrack.IsPlaying then
+        runTrack:Stop()
     end
 end
 
-local function stopWalk()
-    if currentWalkTrack and currentWalkTrack.IsPlaying then
-        currentWalkTrack:Stop()
-    end
-end
-
--- Reset animation track when character respawns
+-- Reset animation when character respawns
 localPlayer.CharacterAdded:Connect(function()
-    currentWalkTrack = nil
+    runTrack = nil
 end)
 
 --------------------------------------------------------
@@ -174,13 +187,13 @@ local function createFollowGui()
         followEnabled = not followEnabled
         updateToggleVisual()
         if not followEnabled then
-            stopWalk()
+            stopRunAnimation()
         end
     end)
 
     updateToggleVisual()
 
-    -- (No draggable window as requested)
+    -- No draggable window (as requested)
 end
 
 createFollowGui()
@@ -273,14 +286,14 @@ end
 RunService.Heartbeat:Connect(function()
     local char = localPlayer.Character
     if not char then
-        stopWalk()
+        stopRunAnimation()
         return
     end
 
     local humanoid = char:FindFirstChildOfClass("Humanoid")
     local root = char:FindFirstChild("HumanoidRootPart")
     if not humanoid or not root then
-        stopWalk()
+        stopRunAnimation()
         return
     end
 
@@ -291,7 +304,7 @@ RunService.Heartbeat:Connect(function()
     --------------------------------------------------------
     if not followEnabled then
         humanoid:Move(Vector3.new())
-        stopWalk()
+        stopRunAnimation()
         return
     end
 
@@ -330,7 +343,7 @@ RunService.Heartbeat:Connect(function()
 
                     -- Stop movement while interacting
                     humanoid:Move(Vector3.new())
-                    stopWalk()
+                    stopRunAnimation()
                     skipFollow = true
 
                     task.spawn(function()
@@ -365,7 +378,7 @@ RunService.Heartbeat:Connect(function()
     local target = getTarget()
     if not target or not target.Character then
         humanoid:Move(Vector3.new())
-        stopWalk()
+        stopRunAnimation()
         return
     end
 
@@ -374,7 +387,7 @@ RunService.Heartbeat:Connect(function()
     local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
     if not targetHum or not targetRoot then
         humanoid:Move(Vector3.new())
-        stopWalk()
+        stopRunAnimation()
         return
     end
 
@@ -383,10 +396,10 @@ RunService.Heartbeat:Connect(function()
     -- if too close, stop
     if distance <= STOP_DISTANCE then
         humanoid:Move(Vector3.new())
-        stopWalk()
+        stopRunAnimation()
         return
     end
 
     humanoid:MoveTo(targetRoot.Position)
-    playWalk(humanoid)
+    playRunAnimation(humanoid)
 end)
