@@ -1,0 +1,392 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local localPlayer = Players.LocalPlayer
+
+--------------------------------------------------------
+-- PLACE / LOBBY
+--------------------------------------------------------
+
+local LOBBY_PLACE_ID = 88043900517876
+local IS_LOBBY = (game.PlaceId == LOBBY_PLACE_ID)
+
+--------------------------------------------------------
+-- CONFIG
+--------------------------------------------------------
+
+-- default value, can be changed from GUI
+local TARGET_USERNAME = "-"
+
+local STOP_DISTANCE = 4                 -- stop when too close to target
+local FOLLOW_SPEED  = 16.24             -- follower WalkSpeed
+
+local PROXIMITY_DETECTION_RADIUS = 4    -- prompt detection radius (non-lobby)
+local INTERACT_COOLDOWN = 1             -- seconds between same prompt interactions
+
+-- Portal-specific config
+local PORTAL_DELAY_BEFORE_USE = 2       -- wait 2s before using a portal
+local MIN_MOVE_AFTER_PORTAL = 20        -- must move this many studs after a portal
+                                        -- before any next Portal can auto-fire
+
+--------------------------------------------------------
+-- INTERNAL STATE
+--------------------------------------------------------
+
+local proximityPrompts = {}
+local isNearPrompt = false
+
+local lastInteractedPrompt = nil
+local lastInteractTime = 0
+
+local lastRootPos = nil
+local distanceMovedSincePortal = 0      -- how far we’ve moved since last portal use
+
+local followEnabled = true              -- controlled by GUI toggle
+
+-- Walking animation state
+local walkAnimation = Instance.new("Animation")
+walkAnimation.AnimationId = "rbxassetid://180426354" -- classic Roblox walk
+local currentWalkTrack = nil
+
+local function ensureWalkTrack(humanoid)
+    if not humanoid then return end
+    if not currentWalkTrack or currentWalkTrack.Parent ~= humanoid then
+        currentWalkTrack = humanoid:LoadAnimation(walkAnimation)
+        currentWalkTrack.Priority = Enum.AnimationPriority.Movement
+        currentWalkTrack.Looped = true
+    end
+end
+
+local function playWalk(humanoid)
+    ensureWalkTrack(humanoid)
+    if currentWalkTrack and not currentWalkTrack.IsPlaying then
+        currentWalkTrack:Play()
+    end
+end
+
+local function stopWalk()
+    if currentWalkTrack and currentWalkTrack.IsPlaying then
+        currentWalkTrack:Stop()
+    end
+end
+
+-- Reset animation track when character respawns
+localPlayer.CharacterAdded:Connect(function()
+    currentWalkTrack = nil
+end)
+
+--------------------------------------------------------
+-- GUI SETUP (overlay top-left)
+--------------------------------------------------------
+
+local function createFollowGui()
+    local playerGui = localPlayer:WaitForChild("PlayerGui")
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "FollowControllerGui"
+    screenGui.ResetOnSpawn = false
+    screenGui.Parent = playerGui
+
+    local frame = Instance.new("Frame")
+    frame.Name = "MainFrame"
+    frame.Size = UDim2.new(0, 200, 0, 90)
+    frame.Position = UDim2.new(0, 10, 0, 10) -- top-left
+    frame.BackgroundTransparency = 0.2
+    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+    frame.BorderSizePixel = 0
+    frame.Parent = screenGui
+
+    local uiCorner = Instance.new("UICorner")
+    uiCorner.CornerRadius = UDim.new(0, 6)
+    uiCorner.Parent = frame
+
+    local titleLabel = Instance.new("TextLabel")
+    titleLabel.Name = "Title"
+    titleLabel.Size = UDim2.new(1, -10, 0, 20)
+    titleLabel.Position = UDim2.new(0, 5, 0, 5)
+    titleLabel.BackgroundTransparency = 1
+    titleLabel.Font = Enum.Font.GothamBold
+    titleLabel.TextSize = 14
+    titleLabel.TextColor3 = Color3.new(1, 1, 1)
+    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+    titleLabel.Text = "Follow Controller"
+    titleLabel.Parent = frame
+
+    local nameBox = Instance.new("TextBox")
+    nameBox.Name = "UsernameBox"
+    nameBox.Size = UDim2.new(1, -10, 0, 24)
+    nameBox.Position = UDim2.new(0, 5, 0, 30)
+    nameBox.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    nameBox.BorderSizePixel = 0
+    nameBox.ClearTextOnFocus = false
+    nameBox.Text = TARGET_USERNAME
+    nameBox.PlaceholderText = "Target username"
+    nameBox.Font = Enum.Font.Gotham
+    nameBox.TextSize = 14
+    nameBox.TextColor3 = Color3.new(1, 1, 1)
+    nameBox.TextXAlignment = Enum.TextXAlignment.Left
+    nameBox.Parent = frame
+
+    local nameCorner = Instance.new("UICorner")
+    nameCorner.CornerRadius = UDim.new(0, 4)
+    nameCorner.Parent = nameBox
+
+    local toggleButton = Instance.new("TextButton")
+    toggleButton.Name = "ToggleButton"
+    toggleButton.Size = UDim2.new(1, -10, 0, 24)
+    toggleButton.Position = UDim2.new(0, 5, 0, 60)
+    toggleButton.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+    toggleButton.BorderSizePixel = 0
+    toggleButton.Font = Enum.Font.GothamBold
+    toggleButton.TextSize = 14
+    toggleButton.TextColor3 = Color3.new(1, 1, 1)
+    toggleButton.Text = "Follow: ON"
+    toggleButton.Parent = frame
+
+    local toggleCorner = Instance.new("UICorner")
+    toggleCorner.CornerRadius = UDim.new(0, 4)
+    toggleCorner.Parent = toggleButton
+
+    ----------------------------------------------------
+    -- TextBox behavior: update TARGET_USERNAME
+    ----------------------------------------------------
+    nameBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed and nameBox.Text ~= "" then
+            TARGET_USERNAME = nameBox.Text
+        end
+    end)
+
+    ----------------------------------------------------
+    -- Toggle button behavior
+    ----------------------------------------------------
+    local function updateToggleVisual()
+        if followEnabled then
+            toggleButton.Text = "Follow: ON"
+            toggleButton.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
+        else
+            toggleButton.Text = "Follow: OFF"
+            toggleButton.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+        end
+    end
+
+    toggleButton.MouseButton1Click:Connect(function()
+        followEnabled = not followEnabled
+        updateToggleVisual()
+        if not followEnabled then
+            stopWalk()
+        end
+    end)
+
+    updateToggleVisual()
+
+    -- (No draggable window as requested)
+end
+
+createFollowGui()
+
+--------------------------------------------------------
+-- HELPERS
+--------------------------------------------------------
+
+local function getTarget()
+    return Players:FindFirstChild(TARGET_USERNAME)
+end
+
+local function registerPrompt(prompt)
+    if prompt:IsA("ProximityPrompt") then
+        table.insert(proximityPrompts, prompt)
+    end
+end
+
+-- Optional: full path helper for debugging
+local function getFullPath(instance)
+    local path = instance.Name
+    local parent = instance.Parent
+
+    while parent do
+        path = parent.Name .. "." .. path
+        parent = parent.Parent
+    end
+
+    return path
+end
+
+--------------------------------------------------------
+-- PROXIMITY PROMPT SETUP (only if NOT in lobby)
+--------------------------------------------------------
+
+if not IS_LOBBY then
+    -- existing prompts
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") then
+            registerPrompt(desc)
+        end
+    end
+
+    -- new prompts
+    Workspace.DescendantAdded:Connect(function(desc)
+        if desc:IsA("ProximityPrompt") then
+            registerPrompt(desc)
+        end
+    end)
+end
+
+local function checkForNearbyPrompt(rootPart)
+    local closestDist = math.huge
+    local closestPrompt = nil
+
+    for i = #proximityPrompts, 1, -1 do
+        local prompt = proximityPrompts[i]
+
+        if not prompt or not prompt.Parent then
+            table.remove(proximityPrompts, i)
+        else
+            if prompt.Enabled then
+                local promptPart = prompt.Parent
+                if not promptPart:IsA("BasePart") then
+                    promptPart = prompt.Parent:FindFirstChildWhichIsA("BasePart")
+                end
+
+                if promptPart then
+                    local dist = (promptPart.Position - rootPart.Position).Magnitude
+                    if dist < closestDist then
+                        closestDist = dist
+                        closestPrompt = prompt
+                    end
+                end
+            end
+        end
+    end
+
+    if closestPrompt and closestDist <= PROXIMITY_DETECTION_RADIUS then
+        return true, closestPrompt, closestDist
+    else
+        return false, nil, closestDist
+    end
+end
+
+--------------------------------------------------------
+-- MAIN LOOP
+--------------------------------------------------------
+
+RunService.Heartbeat:Connect(function()
+    local char = localPlayer.Character
+    if not char then
+        stopWalk()
+        return
+    end
+
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root then
+        stopWalk()
+        return
+    end
+
+    humanoid.WalkSpeed = FOLLOW_SPEED
+
+    --------------------------------------------------------
+    -- If follow is disabled from GUI, just stop movement
+    --------------------------------------------------------
+    if not followEnabled then
+        humanoid:Move(Vector3.new())
+        stopWalk()
+        return
+    end
+
+    --------------------------------------------------------
+    -- UPDATE MOVEMENT DISTANCE SINCE LAST PORTAL
+    --------------------------------------------------------
+    if lastRootPos then
+        local delta = (root.Position - lastRootPos).Magnitude
+        distanceMovedSincePortal = distanceMovedSincePortal + delta
+    end
+    lastRootPos = root.Position
+
+    local skipFollow = false
+
+    --------------------------------------------------------
+    -- 1) PROXIMITYPROMPT (disabled in lobby)
+    --------------------------------------------------------
+    if not IS_LOBBY then
+        local nearPrompt, prompt = checkForNearbyPrompt(root)
+        isNearPrompt = nearPrompt
+
+        if isNearPrompt and prompt then
+            local parentName = prompt.Parent and prompt.Parent.Name or "?"
+            local now = os.clock()
+            local isPortal = (parentName == "Portal")
+
+            ------------------------------------------------
+            -- PORTAL GUARD
+            ------------------------------------------------
+            if isPortal and distanceMovedSincePortal < MIN_MOVE_AFTER_PORTAL then
+                -- ignore this portal for now
+            else
+                if prompt ~= lastInteractedPrompt or (now - lastInteractTime) > INTERACT_COOLDOWN then
+                    lastInteractedPrompt = prompt
+                    lastInteractTime = now
+
+                    -- Stop movement while interacting
+                    humanoid:Move(Vector3.new())
+                    stopWalk()
+                    skipFollow = true
+
+                    task.spawn(function()
+                        if isPortal then
+                            task.wait(PORTAL_DELAY_BEFORE_USE)
+                            distanceMovedSincePortal = 0
+                        end
+
+                        if prompt.HoldDuration == 0 then
+                            prompt:InputHoldBegin()
+                            prompt:InputHoldEnd()
+                        else
+                            prompt:InputHoldBegin()
+                            task.wait(prompt.HoldDuration)
+                            prompt:InputHoldEnd()
+                        end
+                    end)
+                end
+            end
+        end
+    else
+        isNearPrompt = false
+    end
+
+    if skipFollow then
+        return
+    end
+
+    --------------------------------------------------------
+    -- 2) FOLLOW TARGET USING MOVETO
+    --------------------------------------------------------
+    local target = getTarget()
+    if not target or not target.Character then
+        humanoid:Move(Vector3.new())
+        stopWalk()
+        return
+    end
+
+    local targetChar = target.Character
+    local targetHum = targetChar:FindFirstChildOfClass("Humanoid")
+    local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+    if not targetHum or not targetRoot then
+        humanoid:Move(Vector3.new())
+        stopWalk()
+        return
+    end
+
+    local distance = (targetRoot.Position - root.Position).Magnitude
+
+    -- if too close, stop
+    if distance <= STOP_DISTANCE then
+        humanoid:Move(Vector3.new())
+        stopWalk()
+        return
+    end
+
+    humanoid:MoveTo(targetRoot.Position)
+    playWalk(humanoid)
+end)
