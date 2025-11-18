@@ -1,8 +1,29 @@
+-- // Services
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local localPlayer = Players.LocalPlayer
+
+-- // Rayfield UI (auto-load & config saving)
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "Follow Controller",
+    LoadingTitle = "Follow Script",
+    LoadingSubtitle = "Rayfield UI",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "FollowScriptConfigs", -- change if you want a different folder
+        FileName = "FollowSettings"
+    },
+    Discord = {
+        Enabled = false,
+        Invite = "",
+        RememberJoins = false
+    },
+    KeySystem = false
+})
 
 --------------------------------------------------------
 -- PLACE / LOBBY
@@ -15,7 +36,7 @@ local IS_LOBBY = (game.PlaceId == LOBBY_PLACE_ID)
 -- CONFIG
 --------------------------------------------------------
 
--- default value, can be changed from GUI
+-- default value, can be changed from Rayfield input
 local TARGET_USERNAME = "-"
 
 local STOP_DISTANCE = 4                 -- stop when too close to target
@@ -29,8 +50,8 @@ local PORTAL_DELAY_BEFORE_USE = 2       -- wait 2s before using a portal
 local MIN_MOVE_AFTER_PORTAL = 20        -- must move this many studs after a portal
                                         -- before any next Portal can auto-fire
 
--- Run / walk animation
-local RUN_ANIMATION_ID = 507767714      -- your chosen walk/run animation asset id (R15)
+-- Run / walk animation (R15)
+local RUN_ANIMATION_ID = 507767714      -- your chosen walk/run animation asset id
 
 --------------------------------------------------------
 -- INTERNAL STATE
@@ -45,10 +66,10 @@ local lastInteractTime = 0
 local lastRootPos = nil
 local distanceMovedSincePortal = 0      -- how far we’ve moved since last portal use
 
-local followEnabled = true              -- controlled by GUI toggle
+local followEnabled = true              -- controlled by Rayfield toggle
 
 --------------------------------------------------------
--- RUN / WALK ANIMATION HANDLER
+-- RUN / WALK ANIMATION HANDLER (hooked via Humanoid.Running)
 --------------------------------------------------------
 
 local runTrack = nil
@@ -58,12 +79,11 @@ local function setupRunAnimation(humanoid)
     if not humanoid then return end
     if RUN_ANIMATION_ID == 0 then return end
 
-    -- R6 check: this ID is R15 – on R6 it won't play
+    -- This ID is R15, so skip R6 to avoid weirdness
     if humanoid.RigType == Enum.HumanoidRigType.R6 then
         return
     end
 
-    -- Get Animator
     local animator = humanoid:FindFirstChildOfClass("Animator")
     if not animator then
         animator = Instance.new("Animator")
@@ -75,7 +95,7 @@ local function setupRunAnimation(humanoid)
         runAnim.AnimationId = "rbxassetid://" .. RUN_ANIMATION_ID
     end
 
-    -- Already loaded on this animator?
+    -- already loaded on this animator?
     if runTrack and runTrack.Parent == animator then
         return
     end
@@ -98,117 +118,74 @@ local function stopRunAnimation()
     end
 end
 
--- Reset animation when character respawns
-localPlayer.CharacterAdded:Connect(function()
+-- Hook Humanoid.Running so animation follows actual movement
+local function hookHumanoidRunning(char)
     runTrack = nil
-end)
 
---------------------------------------------------------
--- GUI SETUP (overlay top-left)
---------------------------------------------------------
-
-local function createFollowGui()
-    local playerGui = localPlayer:WaitForChild("PlayerGui")
-
-    local screenGui = Instance.new("ScreenGui")
-    screenGui.Name = "FollowControllerGui"
-    screenGui.ResetOnSpawn = false
-    screenGui.Parent = playerGui
-
-    local frame = Instance.new("Frame")
-    frame.Name = "MainFrame"
-    frame.Size = UDim2.new(0, 200, 0, 90)
-    frame.Position = UDim2.new(0, 10, 0, 10) -- top-left
-    frame.BackgroundTransparency = 0.2
-    frame.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
-    frame.BorderSizePixel = 0
-    frame.Parent = screenGui
-
-    local uiCorner = Instance.new("UICorner")
-    uiCorner.CornerRadius = UDim.new(0, 6)
-    uiCorner.Parent = frame
-
-    local titleLabel = Instance.new("TextLabel")
-    titleLabel.Name = "Title"
-    titleLabel.Size = UDim2.new(1, -10, 0, 20)
-    titleLabel.Position = UDim2.new(0, 5, 0, 5)
-    titleLabel.BackgroundTransparency = 1
-    titleLabel.Font = Enum.Font.GothamBold
-    titleLabel.TextSize = 14
-    titleLabel.TextColor3 = Color3.new(1, 1, 1)
-    titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-    titleLabel.Text = "Follow Controller"
-    titleLabel.Parent = frame
-
-    local nameBox = Instance.new("TextBox")
-    nameBox.Name = "UsernameBox"
-    nameBox.Size = UDim2.new(1, -10, 0, 24)
-    nameBox.Position = UDim2.new(0, 5, 0, 30)
-    nameBox.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-    nameBox.BorderSizePixel = 0
-    nameBox.ClearTextOnFocus = false
-    nameBox.Text = TARGET_USERNAME
-    nameBox.PlaceholderText = "Target username"
-    nameBox.Font = Enum.Font.Gotham
-    nameBox.TextSize = 14
-    nameBox.TextColor3 = Color3.new(1, 1, 1)
-    nameBox.TextXAlignment = Enum.TextXAlignment.Left
-    nameBox.Parent = frame
-
-    local nameCorner = Instance.new("UICorner")
-    nameCorner.CornerRadius = UDim.new(0, 4)
-    nameCorner.Parent = nameBox
-
-    local toggleButton = Instance.new("TextButton")
-    toggleButton.Name = "ToggleButton"
-    toggleButton.Size = UDim2.new(1, -10, 0, 24)
-    toggleButton.Position = UDim2.new(0, 5, 0, 60)
-    toggleButton.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-    toggleButton.BorderSizePixel = 0
-    toggleButton.Font = Enum.Font.GothamBold
-    toggleButton.TextSize = 14
-    toggleButton.TextColor3 = Color3.new(1, 1, 1)
-    toggleButton.Text = "Follow: ON"
-    toggleButton.Parent = frame
-
-    local toggleCorner = Instance.new("UICorner")
-    toggleCorner.CornerRadius = UDim.new(0, 4)
-    toggleCorner.Parent = toggleButton
-
-    ----------------------------------------------------
-    -- TextBox behavior: update TARGET_USERNAME
-    ----------------------------------------------------
-    nameBox.FocusLost:Connect(function(enterPressed)
-        if enterPressed and nameBox.Text ~= "" then
-            TARGET_USERNAME = nameBox.Text
-        end
-    end)
-
-    ----------------------------------------------------
-    -- Toggle button behavior
-    ----------------------------------------------------
-    local function updateToggleVisual()
-        if followEnabled then
-            toggleButton.Text = "Follow: ON"
-            toggleButton.BackgroundColor3 = Color3.fromRGB(0, 170, 0)
-        else
-            toggleButton.Text = "Follow: OFF"
-            toggleButton.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
-        end
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        humanoid = char:WaitForChild("Humanoid", 5)
     end
+    if not humanoid then return end
 
-    toggleButton.MouseButton1Click:Connect(function()
-        followEnabled = not followEnabled
-        updateToggleVisual()
+    humanoid.Running:Connect(function(speed)
+        -- If follow is off, do not play custom walk
         if not followEnabled then
+            stopRunAnimation()
+            return
+        end
+
+        if speed > 0.1 then
+            playRunAnimation(humanoid)
+        else
             stopRunAnimation()
         end
     end)
-
-    updateToggleVisual()
 end
 
-createFollowGui()
+localPlayer.CharacterAdded:Connect(hookHumanoidRunning)
+if localPlayer.Character then
+    hookHumanoidRunning(localPlayer.Character)
+end
+
+--------------------------------------------------------
+-- RAYFIELD UI: TAB + INPUT + TOGGLE
+--------------------------------------------------------
+
+local MainTab = Window:CreateTab("Main", 4483362458) -- icon id optional
+
+-- Username input
+local UsernameInput = MainTab:CreateInput({
+    Name = "Target Username",
+    CurrentValue = TARGET_USERNAME,
+    PlaceholderText = "Enter username to follow",
+    RemoveTextAfterFocusLost = false,
+    Flag = "Follow_Target_Username", -- saved in config
+    Callback = function(Text)
+        if Text ~= "" then
+            TARGET_USERNAME = Text
+        end
+    end,
+})
+
+-- Follow toggle
+local FollowToggle = MainTab:CreateToggle({
+    Name = "Follow Enabled",
+    CurrentValue = true,
+    Flag = "Follow_Enabled", -- saved in config
+    Callback = function(Value)
+        followEnabled = Value
+        if not followEnabled then
+            stopRunAnimation()
+        end
+    end,
+})
+
+-- Optional: show some info
+MainTab:CreateParagraph({
+    Title = "Info",
+    Content = "Enter a username in this server and toggle Follow ON.\nScript will auto-use saved settings next time."
+})
 
 --------------------------------------------------------
 -- HELPERS
@@ -312,11 +289,10 @@ RunService.Heartbeat:Connect(function()
     humanoid.WalkSpeed = FOLLOW_SPEED
 
     --------------------------------------------------------
-    -- If follow is disabled from GUI, just stop movement
+    -- If follow is disabled from UI, just stop movement
     --------------------------------------------------------
     if not followEnabled then
         humanoid:Move(Vector3.new())
-        stopRunAnimation()
         return
     end
 
@@ -355,7 +331,6 @@ RunService.Heartbeat:Connect(function()
 
                     -- Stop movement while interacting
                     humanoid:Move(Vector3.new())
-                    stopRunAnimation()
                     skipFollow = true
 
                     task.spawn(function()
@@ -390,7 +365,6 @@ RunService.Heartbeat:Connect(function()
     local target = getTarget()
     if not target or not target.Character then
         humanoid:Move(Vector3.new())
-        stopRunAnimation()
         return
     end
 
@@ -399,7 +373,6 @@ RunService.Heartbeat:Connect(function()
     local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
     if not targetHum or not targetRoot then
         humanoid:Move(Vector3.new())
-        stopRunAnimation()
         return
     end
 
@@ -408,10 +381,9 @@ RunService.Heartbeat:Connect(function()
     -- if too close, stop
     if distance <= STOP_DISTANCE then
         humanoid:Move(Vector3.new())
-        stopRunAnimation()
         return
     end
 
     humanoid:MoveTo(targetRoot.Position)
-    playRunAnimation(humanoid)
+    -- animation handled by Humanoid.Running
 end)
