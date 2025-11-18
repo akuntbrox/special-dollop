@@ -5,7 +5,7 @@ local Workspace = game:GetService("Workspace")
 
 local localPlayer = Players.LocalPlayer
 
--- // Rayfield UI (auto-load & config saving)
+-- // Rayfield UI
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local Window = Rayfield:CreateWindow({
@@ -14,8 +14,8 @@ local Window = Rayfield:CreateWindow({
     LoadingSubtitle = "Rayfield UI",
     ConfigurationSaving = {
         Enabled = true,
-        FolderName = "FollowScriptConfigs", -- change if you want a different folder
-        FileName = "FollowSettings"
+        FolderName = "FollowScriptConfigs", -- config folder
+        FileName = "FollowSettings"        -- config file name
     },
     Discord = {
         Enabled = false,
@@ -36,22 +36,18 @@ local IS_LOBBY = (game.PlaceId == LOBBY_PLACE_ID)
 -- CONFIG
 --------------------------------------------------------
 
--- default value, can be changed from Rayfield input
+-- these will be overridden by Rayfield config if present
 local TARGET_USERNAME = "-"
+local STOP_DISTANCE = 4
+local FOLLOW_SPEED  = 16.24
 
-local STOP_DISTANCE = 4                 -- stop when too close to target
-local FOLLOW_SPEED  = 16.24             -- follower WalkSpeed
+local PROXIMITY_DETECTION_RADIUS = 4
+local INTERACT_COOLDOWN = 1
 
-local PROXIMITY_DETECTION_RADIUS = 4    -- prompt detection radius (non-lobby)
-local INTERACT_COOLDOWN = 1             -- seconds between same prompt interactions
+local PORTAL_DELAY_BEFORE_USE = 2
+local MIN_MOVE_AFTER_PORTAL = 20
 
--- Portal-specific config
-local PORTAL_DELAY_BEFORE_USE = 2       -- wait 2s before using a portal
-local MIN_MOVE_AFTER_PORTAL = 20        -- must move this many studs after a portal
-                                        -- before any next Portal can auto-fire
-
--- Run / walk animation (R15)
-local RUN_ANIMATION_ID = 507767714      -- your chosen walk/run animation asset id
+local RUN_ANIMATION_ID = 507767714 -- walk/run anim
 
 --------------------------------------------------------
 -- INTERNAL STATE
@@ -64,12 +60,12 @@ local lastInteractedPrompt = nil
 local lastInteractTime = 0
 
 local lastRootPos = nil
-local distanceMovedSincePortal = 0      -- how far we’ve moved since last portal use
+local distanceMovedSincePortal = 0
 
-local followEnabled = true              -- controlled by Rayfield toggle
+local followEnabled = true
 
 --------------------------------------------------------
--- RUN / WALK ANIMATION HANDLER (hooked via Humanoid.Running)
+-- ANIMATION (Humanoid.Running hooked)
 --------------------------------------------------------
 
 local runTrack = nil
@@ -79,7 +75,7 @@ local function setupRunAnimation(humanoid)
     if not humanoid then return end
     if RUN_ANIMATION_ID == 0 then return end
 
-    -- This ID is R15, so skip R6 to avoid weirdness
+    -- this id is R15
     if humanoid.RigType == Enum.HumanoidRigType.R6 then
         return
     end
@@ -95,7 +91,6 @@ local function setupRunAnimation(humanoid)
         runAnim.AnimationId = "rbxassetid://" .. RUN_ANIMATION_ID
     end
 
-    -- already loaded on this animator?
     if runTrack and runTrack.Parent == animator then
         return
     end
@@ -118,18 +113,13 @@ local function stopRunAnimation()
     end
 end
 
--- Hook Humanoid.Running so animation follows actual movement
 local function hookHumanoidRunning(char)
     runTrack = nil
 
-    local humanoid = char:FindFirstChildOfClass("Humanoid")
-    if not humanoid then
-        humanoid = char:WaitForChild("Humanoid", 5)
-    end
+    local humanoid = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
     if not humanoid then return end
 
     humanoid.Running:Connect(function(speed)
-        -- If follow is off, do not play custom walk
         if not followEnabled then
             stopRunAnimation()
             return
@@ -152,15 +142,14 @@ end
 -- RAYFIELD UI: TAB + INPUT + TOGGLE
 --------------------------------------------------------
 
-local MainTab = Window:CreateTab("Main", 4483362458) -- icon id optional
+local MainTab = Window:CreateTab("Main", 4483362458)
 
--- Username input
 local UsernameInput = MainTab:CreateInput({
     Name = "Target Username",
     CurrentValue = TARGET_USERNAME,
     PlaceholderText = "Enter username to follow",
     RemoveTextAfterFocusLost = false,
-    Flag = "Follow_Target_Username", -- saved in config
+    Flag = "Follow_Target_Username",
     Callback = function(Text)
         if Text ~= "" then
             TARGET_USERNAME = Text
@@ -168,11 +157,10 @@ local UsernameInput = MainTab:CreateInput({
     end,
 })
 
--- Follow toggle
 local FollowToggle = MainTab:CreateToggle({
     Name = "Follow Enabled",
     CurrentValue = true,
-    Flag = "Follow_Enabled", -- saved in config
+    Flag = "Follow_Enabled",
     Callback = function(Value)
         followEnabled = Value
         if not followEnabled then
@@ -181,11 +169,38 @@ local FollowToggle = MainTab:CreateToggle({
     end,
 })
 
--- Optional: show some info
 MainTab:CreateParagraph({
     Title = "Info",
-    Content = "Enter a username in this server and toggle Follow ON.\nScript will auto-use saved settings next time."
+    Content = "Type a username from this server and turn Follow ON.\nSettings auto-save & auto-load."
 })
+
+--------------------------------------------------------
+-- LOAD RAYFIELD CONFIG & SYNC VARIABLES
+--------------------------------------------------------
+
+-- This line actually loads the saved config file
+Rayfield:LoadConfiguration()
+
+-- Now manually sync our variables from the loaded flags:
+task.defer(function()
+    -- sometimes values are populated right after LoadConfiguration,
+    -- so we defer 1 frame to be safe
+    local flags = Rayfield.Flags
+
+    if flags and flags["Follow_Target_Username"] then
+        local savedName = flags["Follow_Target_Username"].CurrentValue
+        if typeof(savedName) == "string" and savedName ~= "" then
+            TARGET_USERNAME = savedName
+        end
+    end
+
+    if flags and flags["Follow_Enabled"] then
+        local savedFollow = flags["Follow_Enabled"].CurrentValue
+        if typeof(savedFollow) == "boolean" then
+            followEnabled = savedFollow
+        end
+    end
+end)
 
 --------------------------------------------------------
 -- HELPERS
@@ -201,32 +216,17 @@ local function registerPrompt(prompt)
     end
 end
 
--- Optional: full path helper for debugging
-local function getFullPath(instance)
-    local path = instance.Name
-    local parent = instance.Parent
-
-    while parent do
-        path = parent.Name .. "." .. path
-        parent = parent.Parent
-    end
-
-    return path
-end
-
 --------------------------------------------------------
--- PROXIMITY PROMPT SETUP (only if NOT in lobby)
+-- PROXIMITY PROMPT SETUP (non-lobby)
 --------------------------------------------------------
 
 if not IS_LOBBY then
-    -- existing prompts
     for _, desc in ipairs(Workspace:GetDescendants()) do
         if desc:IsA("ProximityPrompt") then
             registerPrompt(desc)
         end
     end
 
-    -- new prompts
     Workspace.DescendantAdded:Connect(function(desc)
         if desc:IsA("ProximityPrompt") then
             registerPrompt(desc)
@@ -288,17 +288,11 @@ RunService.Heartbeat:Connect(function()
 
     humanoid.WalkSpeed = FOLLOW_SPEED
 
-    --------------------------------------------------------
-    -- If follow is disabled from UI, just stop movement
-    --------------------------------------------------------
     if not followEnabled then
         humanoid:Move(Vector3.new())
         return
     end
 
-    --------------------------------------------------------
-    -- UPDATE MOVEMENT DISTANCE SINCE LAST PORTAL
-    --------------------------------------------------------
     if lastRootPos then
         local delta = (root.Position - lastRootPos).Magnitude
         distanceMovedSincePortal = distanceMovedSincePortal + delta
@@ -307,9 +301,6 @@ RunService.Heartbeat:Connect(function()
 
     local skipFollow = false
 
-    --------------------------------------------------------
-    -- 1) PROXIMITYPROMPT (disabled in lobby)
-    --------------------------------------------------------
     if not IS_LOBBY then
         local nearPrompt, prompt = checkForNearbyPrompt(root)
         isNearPrompt = nearPrompt
@@ -319,9 +310,6 @@ RunService.Heartbeat:Connect(function()
             local now = os.clock()
             local isPortal = (parentName == "Portal")
 
-            ------------------------------------------------
-            -- PORTAL GUARD
-            ------------------------------------------------
             if isPortal and distanceMovedSincePortal < MIN_MOVE_AFTER_PORTAL then
                 -- ignore this portal for now
             else
@@ -329,7 +317,6 @@ RunService.Heartbeat:Connect(function()
                     lastInteractedPrompt = prompt
                     lastInteractTime = now
 
-                    -- Stop movement while interacting
                     humanoid:Move(Vector3.new())
                     skipFollow = true
 
@@ -359,9 +346,6 @@ RunService.Heartbeat:Connect(function()
         return
     end
 
-    --------------------------------------------------------
-    -- 2) FOLLOW TARGET USING MOVETO
-    --------------------------------------------------------
     local target = getTarget()
     if not target or not target.Character then
         humanoid:Move(Vector3.new())
@@ -378,12 +362,11 @@ RunService.Heartbeat:Connect(function()
 
     local distance = (targetRoot.Position - root.Position).Magnitude
 
-    -- if too close, stop
     if distance <= STOP_DISTANCE then
         humanoid:Move(Vector3.new())
         return
     end
 
     humanoid:MoveTo(targetRoot.Position)
-    -- animation handled by Humanoid.Running
+    -- Walking animation handled via Humanoid.Running
 end)
