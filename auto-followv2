@@ -46,7 +46,7 @@ local followEnabled = true              -- controlled by GUI toggle
 
 -- Walking animation state
 local walkAnimation = Instance.new("Animation")
-walkAnimation.AnimationId = "rbxassetid://180426354" -- classic Roblox walk
+walkAnimation.AnimationId = "rbxassetid://507767714" -- classic Roblox walk
 local currentWalkTrack = nil
 
 local function ensureWalkTrack(humanoid)
