@@ -1,0 +1,392 @@
+-- // Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local localPlayer = Players.LocalPlayer
+
+-- // Rayfield UI
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "Follow Controller",
+    LoadingTitle = "Follow Script",
+    LoadingSubtitle = "Rayfield UI",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "FollowScriptConfigs", -- config folder
+        FileName = "FollowSettings"        -- config file name
+    },
+    Discord = {
+        Enabled = false,
+        Invite = "",
+        RememberJoins = false
+    },
+    KeySystem = false
+})
+
+--------------------------------------------------------
+-- PLACE / LOBBY
+--------------------------------------------------------
+
+local LOBBY_PLACE_ID = 88043900517876
+local IS_LOBBY = (game.PlaceId == LOBBY_PLACE_ID)
+
+--------------------------------------------------------
+-- CONFIG
+--------------------------------------------------------
+
+-- these will be overridden by Rayfield config if present
+local TARGET_USERNAME = "-"
+local STOP_DISTANCE = 4
+local FOLLOW_SPEED  = 16.24
+
+local PROXIMITY_DETECTION_RADIUS = 4
+local INTERACT_COOLDOWN = 1
+
+local PORTAL_DELAY_BEFORE_USE = 2
+local MIN_MOVE_AFTER_PORTAL = 20
+
+local RUN_ANIMATION_ID = 507767714 -- walk/run anim
+
+--------------------------------------------------------
+-- INTERNAL STATE
+--------------------------------------------------------
+
+local proximityPrompts = {}
+local isNearPrompt = false
+
+local lastInteractedPrompt = nil
+local lastInteractTime = 0
+
+local lastRootPos = nil
+local distanceMovedSincePortal = 0
+
+local followEnabled = true
+
+--------------------------------------------------------
+-- ANIMATION (Humanoid.Running hooked)
+--------------------------------------------------------
+
+local runTrack = nil
+local runAnim = nil
+
+local function setupRunAnimation(humanoid)
+    if not humanoid then return end
+    if RUN_ANIMATION_ID == 0 then return end
+
+    -- this id is R15
+    if humanoid.RigType == Enum.HumanoidRigType.R6 then
+        return
+    end
+
+    local animator = humanoid:FindFirstChildOfClass("Animator")
+    if not animator then
+        animator = Instance.new("Animator")
+        animator.Parent = humanoid
+    end
+
+    if not runAnim then
+        runAnim = Instance.new("Animation")
+        runAnim.AnimationId = "rbxassetid://" .. RUN_ANIMATION_ID
+    end
+
+    if runTrack and runTrack.Parent == animator then
+        return
+    end
+
+    runTrack = animator:LoadAnimation(runAnim)
+    runTrack.Priority = Enum.AnimationPriority.Movement
+    runTrack.Looped = true
+end
+
+local function playRunAnimation(humanoid)
+    setupRunAnimation(humanoid)
+    if runTrack and not runTrack.IsPlaying then
+        runTrack:Play()
+    end
+end
+
+local function stopRunAnimation()
+    if runTrack and runTrack.IsPlaying then
+        runTrack:Stop()
+    end
+end
+
+local function hookHumanoidRunning(char)
+    runTrack = nil
+
+    local humanoid = char:FindFirstChildOfClass("Humanoid") or char:WaitForChild("Humanoid", 5)
+    if not humanoid then return end
+
+    humanoid.Running:Connect(function(speed)
+        if not followEnabled then
+            stopRunAnimation()
+            return
+        end
+
+        if speed > 0.1 then
+            playRunAnimation(humanoid)
+        else
+            stopRunAnimation()
+        end
+    end)
+end
+
+localPlayer.CharacterAdded:Connect(hookHumanoidRunning)
+if localPlayer.Character then
+    hookHumanoidRunning(localPlayer.Character)
+end
+
+--------------------------------------------------------
+-- RAYFIELD UI: TAB + INPUT + TOGGLE
+--------------------------------------------------------
+
+local MainTab = Window:CreateTab("Main", 4483362458)
+
+local UsernameInput = MainTab:CreateInput({
+    Name = "Target Username",
+    CurrentValue = TARGET_USERNAME,
+    PlaceholderText = "Enter username to follow",
+    RemoveTextAfterFocusLost = false,
+    Flag = "Follow_Target_Username",
+    Callback = function(Text)
+        if Text ~= "" then
+            TARGET_USERNAME = Text
+        end
+    end,
+})
+
+local FollowToggle = MainTab:CreateToggle({
+    Name = "Follow Enabled",
+    CurrentValue = true,
+    Flag = "Follow_Enabled",
+    Callback = function(Value)
+        followEnabled = Value
+        if not followEnabled then
+            stopRunAnimation()
+        end
+    end,
+})
+
+local StopDistanceSlider = MainTab:CreateSlider({
+    Name = "Stop Distance",
+    Range = {3, 20},
+    Increment = 1,
+    Suffix = " studs",
+    CurrentValue = STOP_DISTANCE,
+    Flag = "Follow_Stop_Distance",
+    Callback = function(Value)
+        STOP_DISTANCE = Value
+    end,
+})
+
+MainTab:CreateParagraph({
+    Title = "Info",
+    Content = "Type a username from this server and turn Follow ON.\nSettings auto-save & auto-load."
+})
+
+--------------------------------------------------------
+-- LOAD RAYFIELD CONFIG & SYNC VARIABLES
+--------------------------------------------------------
+
+-- This line actually loads the saved config file
+Rayfield:LoadConfiguration()
+
+-- Now manually sync our variables from the loaded flags:
+task.defer(function()
+    -- sometimes values are populated right after LoadConfiguration,
+    -- so we defer 1 frame to be safe
+    local flags = Rayfield.Flags
+
+    if flags and flags["Follow_Target_Username"] then
+        local savedName = flags["Follow_Target_Username"].CurrentValue
+        if typeof(savedName) == "string" and savedName ~= "" then
+            TARGET_USERNAME = savedName
+        end
+    end
+
+    if flags and flags["Follow_Enabled"] then
+        local savedFollow = flags["Follow_Enabled"].CurrentValue
+        if typeof(savedFollow) == "boolean" then
+            followEnabled = savedFollow
+        end
+    end
+
+    if flags and flags["Follow_Stop_Distance"] then
+        local savedStop = flags["Follow_Stop_Distance"].CurrentValue
+        if typeof(savedStop) == "number" then
+            STOP_DISTANCE = math.clamp(savedStop, 3, 20)
+            StopDistanceSlider:Set(STOP_DISTANCE)
+        end
+    end
+end)
+
+--------------------------------------------------------
+-- HELPERS
+--------------------------------------------------------
+
+local function getTarget()
+    return Players:FindFirstChild(TARGET_USERNAME)
+end
+
+local function registerPrompt(prompt)
+    if prompt:IsA("ProximityPrompt") then
+        table.insert(proximityPrompts, prompt)
+    end
+end
+
+--------------------------------------------------------
+-- PROXIMITY PROMPT SETUP (non-lobby)
+--------------------------------------------------------
+
+if not IS_LOBBY then
+    for _, desc in ipairs(Workspace:GetDescendants()) do
+        if desc:IsA("ProximityPrompt") then
+            registerPrompt(desc)
+        end
+    end
+
+    Workspace.DescendantAdded:Connect(function(desc)
+        if desc:IsA("ProximityPrompt") then
+            registerPrompt(desc)
+        end
+    end)
+end
+
+local function checkForNearbyPrompt(rootPart)
+    local closestDist = math.huge
+    local closestPrompt = nil
+
+    for i = #proximityPrompts, 1, -1 do
+        local prompt = proximityPrompts[i]
+
+        if not prompt or not prompt.Parent then
+            table.remove(proximityPrompts, i)
+        else
+            if prompt.Enabled then
+                local promptPart = prompt.Parent
+                if not promptPart:IsA("BasePart") then
+                    promptPart = prompt.Parent:FindFirstChildWhichIsA("BasePart")
+                end
+
+                if promptPart then
+                    local dist = (promptPart.Position - rootPart.Position).Magnitude
+                    if dist < closestDist then
+                        closestDist = dist
+                        closestPrompt = prompt
+                    end
+                end
+            end
+        end
+    end
+
+    if closestPrompt and closestDist <= PROXIMITY_DETECTION_RADIUS then
+        return true, closestPrompt, closestDist
+    else
+        return false, nil, closestDist
+    end
+end
+
+--------------------------------------------------------
+-- MAIN LOOP
+--------------------------------------------------------
+
+RunService.Heartbeat:Connect(function()
+    local char = localPlayer.Character
+    if not char then
+        stopRunAnimation()
+        return
+    end
+
+    local humanoid = char:FindFirstChildOfClass("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root then
+        stopRunAnimation()
+        return
+    end
+
+    humanoid.WalkSpeed = FOLLOW_SPEED
+
+    if not followEnabled then
+        humanoid:Move(Vector3.new())
+        return
+    end
+
+    if lastRootPos then
+        local delta = (root.Position - lastRootPos).Magnitude
+        distanceMovedSincePortal = distanceMovedSincePortal + delta
+    end
+    lastRootPos = root.Position
+
+    local skipFollow = false
+
+    if not IS_LOBBY then
+        local nearPrompt, prompt = checkForNearbyPrompt(root)
+        isNearPrompt = nearPrompt
+
+        if isNearPrompt and prompt then
+            local parentName = prompt.Parent and prompt.Parent.Name or "?"
+            local now = os.clock()
+            local isPortal = (parentName == "Portal")
+
+            if isPortal and distanceMovedSincePortal < MIN_MOVE_AFTER_PORTAL then
+                -- ignore this portal for now
+            else
+                if prompt ~= lastInteractedPrompt or (now - lastInteractTime) > INTERACT_COOLDOWN then
+                    lastInteractedPrompt = prompt
+                    lastInteractTime = now
+
+                    humanoid:Move(Vector3.new())
+                    skipFollow = true
+
+                    task.spawn(function()
+                        if isPortal then
+                            task.wait(PORTAL_DELAY_BEFORE_USE)
+                            distanceMovedSincePortal = 0
+                        end
+
+                        if prompt.HoldDuration == 0 then
+                            prompt:InputHoldBegin()
+                            prompt:InputHoldEnd()
+                        else
+                            prompt:InputHoldBegin()
+                            task.wait(prompt.HoldDuration + 1)
+                            prompt:InputHoldEnd()
+                        end
+                    end)
+                end
+            end
+        end
+    else
+        isNearPrompt = false
+    end
+
+    if skipFollow then
+        return
+    end
+
+    local target = getTarget()
+    if not target or not target.Character then
+        humanoid:Move(Vector3.new())
+        return
+    end
+
+    local targetChar = target.Character
+    local targetHum = targetChar:FindFirstChildOfClass("Humanoid")
+    local targetRoot = targetChar:FindFirstChild("HumanoidRootPart")
+    if not targetHum or not targetRoot then
+        humanoid:Move(Vector3.new())
+        return
+    end
+
+    local distance = (targetRoot.Position - root.Position).Magnitude
+
+    if distance <= STOP_DISTANCE then
+        humanoid:Move(Vector3.new())
+        return
+    end
+
+    humanoid:MoveTo(targetRoot.Position)
+    -- Walking animation handled via Humanoid.Running
+end)
