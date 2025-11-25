@@ -9,9 +9,12 @@ local localPlayer = Players.LocalPlayer
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local Window = Rayfield:CreateWindow({
-    Name = "Follow Controller",
-    LoadingTitle = "Follow Script",
-    LoadingSubtitle = "Rayfield UI",
+    Name = "DL HrafnHub",
+    ShowText = "UI HrafnHub",
+    LoadingTitle = "Spinning up arctic circuits...",
+	LoadingSubtitle = "by HrafnHub",
+    DisableRayfieldPrompts = true,
+	DisableBuildWarnings = true,
     ConfigurationSaving = {
         Enabled = true,
         FolderName = "FollowScriptConfigs", -- config folder
