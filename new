@@ -420,6 +420,10 @@ RunService.Heartbeat:Connect(function()
 end)
 
 RunService.Heartbeat:Connect(function()
+    if IS_LOBBY then
+        return
+    end
+
     if not autoImStuckEnabled then
         return
     end
