@@ -145,6 +145,25 @@ local function readDescTextColor(desc)
     return nil
 end
 
+local function readDescTextValue(desc)
+    if not desc then return nil end
+
+    local attrText = desc:GetAttribute("Text")
+    if typeof(attrText) == "string" and attrText ~= "" then
+        return attrText
+    end
+
+    local ok, textValue = pcall(function()
+        return desc.Text
+    end)
+
+    if ok and typeof(textValue) == "string" and textValue ~= "" then
+        return textValue
+    end
+
+    return nil
+end
+
 -- Register EXPBook (Model with a BasePart child)
 local function registerEXPBook(expBook)
     if chestMap[expBook] then return end
@@ -170,6 +189,19 @@ local function registerEXPBook(expBook)
         return readDescTextColor(descRef) or highlightPart.Color
     end
 
+    local function resolveExpLabel()
+        if not descRef or not descRef.Parent then
+            descRef = findExpBookDesc(expBook)
+        end
+
+        local descText = readDescTextValue(descRef)
+        if descText and descText ~= "" then
+            return string.format("EXPBook - %s", descText)
+        end
+
+        return "EXPBook"
+    end
+
     chestMap[expBook] = {
         model = expBook,
         primary = highlightPart,
@@ -180,6 +212,7 @@ local function registerEXPBook(expBook)
         chestType = "EXPBook",
         requirePrompt = false,    -- EXPBook doesn't need a ProximityPrompt
         colorResolver = resolveExpColor,
+        labelResolver = resolveExpLabel,
     }
 end
 
@@ -273,11 +306,15 @@ RunService.RenderStepped:Connect(function()
             data.espGui.Enabled = inRange
 
             if inRange then
-                data.espLabel.Text = string.format(
-                    "%s\n%d studs",
-                    data.chestType,
-                    dist
-                )
+                local labelPrefix = data.chestType
+                if data.labelResolver then
+                    local okText, resolvedText = pcall(data.labelResolver)
+                    if okText and type(resolvedText) == "string" and resolvedText ~= "" then
+                        labelPrefix = resolvedText
+                    end
+                end
+
+                data.espLabel.Text = string.format("%s\n%d studs", labelPrefix, dist)
             end
         else
             -- If primary part disappears, hide ESP
