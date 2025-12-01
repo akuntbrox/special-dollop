@@ -388,12 +388,17 @@ end
 
 -- Validate & load tower
 local function scanTower(tower)
-    if not tonumber(tower.Name) then return end
+    if not tonumber(tower.Name) and tower.Name ~= "N" then return end
 
     -- Normal chest
     local chest = tower:FindFirstChild("Chest")
     if chest then
         registerChest(chest)
+    end
+
+    local secretChest = tower:FindFirstChild("SecretChest")
+    if secretChest then
+        registerChest(secretChest)
     end
 
     -- Ruby (e.g. workspace.Tower["X"].Ruby)
