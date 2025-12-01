@@ -24,6 +24,8 @@ local ChestTypes = {
     ["Earth green"] = "UncommonChest",
 }
 
+local RUBY_COLOR = Color3.fromRGB(255, 0, 0)
+
 -- All tracked ESPs
 local chestMap = {}
 
@@ -104,12 +106,15 @@ local function registerRuby(ruby)
     chestMap[ruby] = {
         model = ruby,
         primary = ruby,
-        down = ruby,              -- use Ruby's own color
+        down = nil,
         espGui = espGui,
         espLabel = espLabel,
         outline = stroke,
         chestType = "Ruby",
         requirePrompt = false,    -- Ruby doesn't need a ProximityPrompt
+        colorResolver = function()
+            return RUBY_COLOR
+        end,
     }
 end
 
