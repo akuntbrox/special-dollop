@@ -224,46 +224,93 @@ local function colorFromAttribute(value)
     return nil
 end
 
-local function registerBagOfGold(node)
-    if not (node:IsA("Model") or node:IsA("BasePart")) then return end
-
-    local bagRoot = node
-    local highlightPart
-    local raysPart
-
-    if node:IsA("Model") then
-        bagRoot = node
-        raysPart = node:FindFirstChild("Rays")
-        highlightPart = node.PrimaryPart or (raysPart and raysPart:IsA("BasePart") and raysPart) or node:FindFirstChildWhichIsA("BasePart")
-    else
-        bagRoot = node.Parent or node
-        highlightPart = node
-        if node.Name == "Rays" then
-            raysPart = node
-        end
+local function readInstanceColor(source)
+    if not source or not source.Parent then
+        return nil
     end
+
+    local attrValue = source:GetAttribute("AppearanceColor") or source:GetAttribute("Color")
+    local attrColor = attrValue and colorFromAttribute(attrValue)
+    if attrColor then
+        return attrColor
+    end
+
+    if source:IsA("ParticleEmitter") then
+        local ok, seq = pcall(function()
+            return source.Color
+        end)
+
+        if ok and typeof(seq) == "ColorSequence" then
+            return seq:Evaluate(0.5)
+        end
+    elseif source:IsA("BasePart") then
+        return source.Color
+    end
+
+    return nil
+end
+
+local function registerBagOfGold(node)
+    if not (node:IsA("Model") or node:IsA("BasePart") or node:IsA("ParticleEmitter")) then return end
+
+    local bagRoot
+    local highlightPart
+    local function resolveBagModel(instance)
+        if instance:IsA("Model") then
+            return instance
+        end
+        return instance:FindFirstAncestorWhichIsA("Model")
+    end
+
+    bagRoot = resolveBagModel(node)
+    if not bagRoot then return end
 
     if chestMap[bagRoot] then return end
 
-    if not (highlightPart and highlightPart:IsA("BasePart")) then return end
-    if not (raysPart and raysPart:IsA("BasePart")) then
-        raysPart = highlightPart
+    if node:IsA("BasePart") then
+        highlightPart = node
+    else
+        highlightPart = bagRoot.PrimaryPart or bagRoot:FindFirstChildWhichIsA("BasePart")
+    end
+
+    if not (highlightPart and highlightPart:IsA("BasePart")) then
+        return
     end
 
     local espGui, espLabel, stroke = createESP(highlightPart)
 
     local function resolveBagColor()
-        if not raysPart or not raysPart.Parent then
-            raysPart = bagRoot and bagRoot:IsA("Model") and bagRoot:FindFirstChild("Rays") or highlightPart
+        if not (bagRoot and bagRoot.Parent) then
+            return highlightPart and highlightPart.Color or Color3.new(1, 1, 0)
         end
 
-        if raysPart then
-            local attrValue = raysPart:GetAttribute("AppearanceColor") or raysPart:GetAttribute("Color")
-            local attrColor = attrValue and colorFromAttribute(attrValue)
-            if attrColor then
-                return attrColor
+        local candidates = {}
+        local function addCandidate(inst)
+            if inst then
+                table.insert(candidates, inst)
             end
-            return raysPart.Color
+        end
+
+        addCandidate(bagRoot:FindFirstChild("Rays"))
+
+        local bagChildren = bagRoot:GetChildren()
+        if bagChildren[4] then
+            addCandidate(bagChildren[4])
+        end
+
+        for _, child in ipairs(bagChildren) do
+            if child:IsA("ParticleEmitter") then
+                addCandidate(child)
+            end
+        end
+
+        addCandidate(highlightPart)
+
+        for _, source in ipairs(candidates) do
+            local color = readInstanceColor(source)
+            if color then
+                return color
+            end
         end
 
         return highlightPart.Color
