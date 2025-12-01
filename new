@@ -264,38 +264,6 @@ local function registerPrompt(prompt)
     end
 end
 
-local function getNearestLock(fromPos)
-    local towerFolder = Workspace:FindFirstChild("Tower")
-    if not towerFolder then
-        return nil, nil
-    end
-
-    local nearestLock = nil
-    local nearestDist = nil
-
-    for _, tower in ipairs(towerFolder:GetChildren()) do
-        local outFolder = tower:FindFirstChild("Out")
-        if outFolder then
-            local portal = outFolder:FindFirstChild("Portal")
-            if portal then
-                local lockContainer = portal:FindFirstChild("Lock")
-                if lockContainer then
-                    local lockPart = lockContainer:FindFirstChild("Lock")
-                    if lockPart and lockPart:IsA("BasePart") then
-                        local dist = (lockPart.Position - fromPos).Magnitude
-                        if not nearestDist or dist < nearestDist then
-                            nearestDist = dist
-                            nearestLock = lockPart
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    return nearestLock, nearestDist
-end
-
 --------------------------------------------------------
 -- PROXIMITY PROMPT SETUP (non-lobby)
 --------------------------------------------------------
@@ -461,13 +429,19 @@ RunService.Heartbeat:Connect(function()
         return
     end
 
-    local hrp = character:FindFirstChild("HumanoidRootPart")
-    if not hrp then
+    local target = getTarget()
+    if not target or not target.Character then
         return
     end
 
-    local nearestLock, dist = getNearestLock(hrp.Position)
-    if nearestLock and dist and dist <= STUCK_RADIUS then
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp or not targetRoot then
+        return
+    end
+
+    local distance = (targetRoot.Position - hrp.Position).Magnitude
+    if distance <= STUCK_RADIUS then
         return
     end
 
