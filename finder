@@ -1,0 +1,156 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+
+local towerFolder = workspace:WaitForChild("Tower")
+local MAX_DISTANCE = 200 -- studs
+
+-- Get player HRP
+local function getHRP()
+    local character = player.Character or player.CharacterAdded:Wait()
+    return character:WaitForChild("HumanoidRootPart")
+end
+
+local hrp = getHRP()
+
+-- CHEST COLOR → NAME TABLE
+local ChestTypes = {
+    ["Really black"] = "CursedChest",
+    ["Dark stone grey"] = "CommonChest",
+    ["Mulberry"] = "EpicChest",
+    ["CGA brown"] = "LegendaryChest",
+    ["Maroon"] = "MythicChest",
+    ["Dark royal blue"] = "RareChest",
+    ["Earth green"] = "UncommonChest",
+}
+
+-- All tracked ESPs
+local chestMap = {}
+
+-- Create fancy ESP
+local function createESP(model)
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "ChestESP"
+    billboard.Adornee = model.PrimaryPart
+    billboard.Size = UDim2.new(0, 160, 0, 60)
+    billboard.StudsOffset = Vector3.new(0, 4, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = true
+
+    local bg = Instance.new("Frame")
+    bg.Parent = billboard
+    bg.Size = UDim2.new(1,0,1,0)
+    bg.BackgroundColor3 = Color3.new(0,0,0)
+    bg.BackgroundTransparency = 0.3
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Parent = bg
+    stroke.Thickness = 2
+    stroke.Color = Color3.new(1,1,1)
+
+    Instance.new("UICorner", bg)
+
+    local label = Instance.new("TextLabel")
+    label.Parent = bg
+    label.Size = UDim2.new(1,-6,1,-6)
+    label.Position = UDim2.new(0,3,0,3)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.new(1,1,1)
+    label.Font = Enum.Font.FredokaOne
+    label.TextScaled = true
+    label.TextStrokeTransparency = 0.3
+    label.TextStrokeColor3 = Color3.new(0,0,0)
+
+    billboard.Parent = model
+    return billboard, label, stroke
+end
+
+-- Register new chest
+local function registerChest(chest)
+    if chestMap[chest] then return end
+    if not chest:IsA("Model") or not chest.PrimaryPart then return end
+
+    local down = chest:FindFirstChild("Down")
+    if not (down and down:IsA("BasePart")) then return end
+
+    local prompt = chest:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt then return end
+
+    -- Get BrickColor name → chest type
+    local bcName = down.BrickColor.Name
+    local chestType = ChestTypes[bcName] or "UnknownChest"
+
+    local espGui, espLabel, stroke = createESP(chest)
+
+    chestMap[chest] = {
+        model = chest,
+        primary = chest.PrimaryPart,
+        down = down,
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+        chestType = chestType,
+    }
+end
+
+-- Validate & load tower
+local function scanTower(tower)
+    if not tonumber(tower.Name) then return end
+    local chest = tower:FindFirstChild("Chest")
+    if chest then
+        registerChest(chest)
+    end
+end
+
+-- MAIN UPDATE LOOP
+RunService.RenderStepped:Connect(function()
+    if not hrp or not hrp.Parent then
+        hrp = getHRP()
+    end
+
+    -- 🔄 Rescan towers every frame (fixes “not updating” issue)
+    for _, tower in ipairs(towerFolder:GetChildren()) do
+        scanTower(tower)
+    end
+
+    -- Update or remove ESP
+    for chest, data in pairs(chestMap) do
+        local model = data.model
+
+        if not model or not model.Parent then
+            data.espGui:Destroy()
+            chestMap[chest] = nil
+            continue
+        end
+
+        if not model:FindFirstChildOfClass("ProximityPrompt") then
+            data.espGui:Destroy()
+            chestMap[chest] = nil
+            continue
+        end
+
+        -- Refresh down part color → chest type
+        local down = data.down
+        if down and down.Parent then
+            local bcName = down.BrickColor.Name
+            data.chestType = ChestTypes[bcName] or "UnknownChest"
+
+            -- Optional: color outline and text with chest color
+            data.espLabel.TextColor3 = down.Color
+            data.outline.Color = down.Color
+        end
+
+        -- Distance logic
+        local dist = (data.primary.Position - hrp.Position).Magnitude
+        local inRange = dist <= MAX_DISTANCE
+        data.espGui.Enabled = inRange
+
+        if inRange then
+            data.espLabel.Text = string.format(
+                "%s\n%d studs",
+                data.chestType,
+                dist
+            )
+        end
+    end
+end)
