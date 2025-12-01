@@ -272,26 +272,20 @@ local function getNearestLock(fromPos)
 
     for _, tower in ipairs(towerFolder:GetChildren()) do
         local outFolder = tower:FindFirstChild("Out")
-        if not outFolder then
-            continue()
-        end
-
-        local portal = outFolder:FindFirstChild("Portal")
-        if not portal then
-            continue()
-        end
-
-        local lockContainer = portal:FindFirstChild("Lock")
-        if not lockContainer then
-            continue()
-        end
-
-        local lockPart = lockContainer:FindFirstChild("Lock")
-        if lockPart and lockPart:IsA("BasePart") then
-            local dist = (lockPart.Position - fromPos).Magnitude
-            if not nearestDist or dist < nearestDist then
-                nearestDist = dist
-                nearestLock = lockPart
+        if outFolder then
+            local portal = outFolder:FindFirstChild("Portal")
+            if portal then
+                local lockContainer = portal:FindFirstChild("Lock")
+                if lockContainer then
+                    local lockPart = lockContainer:FindFirstChild("Lock")
+                    if lockPart and lockPart:IsA("BasePart") then
+                        local dist = (lockPart.Position - fromPos).Magnitude
+                        if not nearestDist or dist < nearestDist then
+                            nearestDist = dist
+                            nearestLock = lockPart
+                        end
+                    end
+                end
             end
         end
     end
