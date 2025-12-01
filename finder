@@ -164,6 +164,63 @@ local function readDescTextValue(desc)
     return nil
 end
 
+local function registerBagOfGold(node)
+    if not (node:IsA("Model") or node:IsA("BasePart")) then return end
+
+    local bagRoot = node
+    local highlightPart
+    local raysPart
+
+    if node:IsA("Model") then
+        bagRoot = node
+        raysPart = node:FindFirstChild("Rays")
+        highlightPart = node.PrimaryPart or (raysPart and raysPart:IsA("BasePart") and raysPart) or node:FindFirstChildWhichIsA("BasePart")
+    else
+        bagRoot = node.Parent or node
+        highlightPart = node
+        if node.Name == "Rays" then
+            raysPart = node
+        end
+    end
+
+    if chestMap[bagRoot] then return end
+
+    if not (highlightPart and highlightPart:IsA("BasePart")) then return end
+    if not (raysPart and raysPart:IsA("BasePart")) then
+        raysPart = highlightPart
+    end
+
+    local espGui, espLabel, stroke = createESP(highlightPart)
+
+    local function resolveBagColor()
+        if not raysPart or not raysPart.Parent then
+            raysPart = bagRoot and bagRoot:IsA("Model") and bagRoot:FindFirstChild("Rays") or highlightPart
+        end
+
+        if raysPart then
+            local attrColor = raysPart:GetAttribute("AppearanceColor") or raysPart:GetAttribute("Color")
+            if typeof(attrColor) == "Color3" then
+                return attrColor
+            end
+            return raysPart.Color
+        end
+
+        return highlightPart.Color
+    end
+
+    chestMap[bagRoot] = {
+        model = bagRoot,
+        primary = highlightPart,
+        down = nil,
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+        chestType = "BagOfGold",
+        requirePrompt = false,
+        colorResolver = resolveBagColor,
+    }
+end
+
 -- Register EXPBook (Model with a BasePart child)
 local function registerEXPBook(expBook)
     if chestMap[expBook] then return end
@@ -236,6 +293,16 @@ local function scanTower(tower)
     local expBook = tower:FindFirstChild("EXPBook")
     if expBook then
         registerEXPBook(expBook)
+    end
+
+    -- Bag of Gold (e.g. workspace.Tower["N"].Bags.GoldBag.Rays)
+    local bagsFolder = tower:FindFirstChild("Bags")
+    if bagsFolder then
+        for _, bag in ipairs(bagsFolder:GetChildren()) do
+            if bag.Name == "GoldBag" then
+                registerBagOfGold(bag)
+            end
+        end
     end
 end
 
