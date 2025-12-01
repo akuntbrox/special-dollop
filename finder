@@ -27,11 +27,11 @@ local ChestTypes = {
 -- All tracked ESPs
 local chestMap = {}
 
--- Create fancy ESP
-local function createESP(model)
+-- Create fancy ESP (works on any BasePart / MeshPart)
+local function createESP(adornee)
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "ChestESP"
-    billboard.Adornee = model.PrimaryPart
+    billboard.Adornee = adornee
     billboard.Size = UDim2.new(0, 160, 0, 60)
     billboard.StudsOffset = Vector3.new(0, 4, 0)
     billboard.AlwaysOnTop = true
@@ -61,11 +61,11 @@ local function createESP(model)
     label.TextStrokeTransparency = 0.3
     label.TextStrokeColor3 = Color3.new(0,0,0)
 
-    billboard.Parent = model
+    billboard.Parent = adornee
     return billboard, label, stroke
 end
 
--- Register new chest
+-- Register new chest (Model with PrimaryPart + Down + ProximityPrompt)
 local function registerChest(chest)
     if chestMap[chest] then return end
     if not chest:IsA("Model") or not chest.PrimaryPart then return end
@@ -80,7 +80,7 @@ local function registerChest(chest)
     local bcName = down.BrickColor.Name
     local chestType = ChestTypes[bcName] or "UnknownChest"
 
-    local espGui, espLabel, stroke = createESP(chest)
+    local espGui, espLabel, stroke = createESP(chest.PrimaryPart)
 
     chestMap[chest] = {
         model = chest,
@@ -90,15 +90,119 @@ local function registerChest(chest)
         espLabel = espLabel,
         outline = stroke,
         chestType = chestType,
+        -- requirePrompt = nil / true (default) → still needs ProximityPrompt
+    }
+end
+
+-- Register Ruby MeshPart (can be anywhere under Tower["X"])
+local function registerRuby(ruby)
+    if chestMap[ruby] then return end
+    if not ruby:IsA("MeshPart") then return end
+
+    local espGui, espLabel, stroke = createESP(ruby)
+
+    chestMap[ruby] = {
+        model = ruby,
+        primary = ruby,
+        down = ruby,              -- use Ruby's own color
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+        chestType = "Ruby",
+        requirePrompt = false,    -- Ruby doesn't need a ProximityPrompt
+    }
+end
+
+local function findExpBookDesc(expBook)
+    local right = expBook:FindFirstChild("Right")
+    if not right then return nil end
+
+    local surfaceGui = right:FindFirstChildOfClass("SurfaceGui") or right:FindFirstChild("SurfaceGui")
+    if not surfaceGui then return nil end
+
+    local expFrame = surfaceGui:FindFirstChild("EXP")
+    if not expFrame then return nil end
+
+    return expFrame:FindFirstChild("Desc")
+end
+
+local function readDescTextColor(desc)
+    if not desc then return nil end
+
+    local attrColor = desc:GetAttribute("TextColor3")
+    if typeof(attrColor) == "Color3" then
+        return attrColor
+    end
+
+    local ok, textColor = pcall(function()
+        return desc.TextColor3
+    end)
+
+    if ok and typeof(textColor) == "Color3" then
+        return textColor
+    end
+
+    return nil
+end
+
+-- Register EXPBook (Model with a BasePart child)
+local function registerEXPBook(expBook)
+    if chestMap[expBook] then return end
+    if not (expBook:IsA("BasePart") or expBook:IsA("Model")) then return end
+
+    local highlightPart
+    if expBook:IsA("BasePart") then
+        highlightPart = expBook
+    else
+        highlightPart = expBook.PrimaryPart or expBook:FindFirstChildWhichIsA("BasePart")
+    end
+
+    if not highlightPart then return end
+
+    local espGui, espLabel, stroke = createESP(highlightPart)
+    local descRef = findExpBookDesc(expBook)
+
+    local function resolveExpColor()
+        if not descRef or not descRef.Parent then
+            descRef = findExpBookDesc(expBook)
+        end
+
+        return readDescTextColor(descRef) or highlightPart.Color
+    end
+
+    chestMap[expBook] = {
+        model = expBook,
+        primary = highlightPart,
+        down = highlightPart,     -- still track the part for cleanup
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+        chestType = "EXPBook",
+        requirePrompt = false,    -- EXPBook doesn't need a ProximityPrompt
+        colorResolver = resolveExpColor,
     }
 end
 
 -- Validate & load tower
 local function scanTower(tower)
     if not tonumber(tower.Name) then return end
+
+    -- Normal chest
     local chest = tower:FindFirstChild("Chest")
     if chest then
         registerChest(chest)
+    end
+
+    -- Ruby (e.g. workspace.Tower["X"].Ruby)
+    local ruby = tower:FindFirstChild("Ruby")
+    if ruby then
+        registerRuby(ruby)
+    end
+
+    -- EXPBook (e.g. workspace.Tower["2"].EXPBook)
+    local expBook = tower:FindFirstChild("EXPBook")
+    if expBook then
+        registerEXPBook(expBook)
     end
 end
 
@@ -108,7 +212,7 @@ RunService.RenderStepped:Connect(function()
         hrp = getHRP()
     end
 
-    -- 🔄 Rescan towers every frame (fixes “not updating” issue)
+    -- 🔄 Rescan towers every frame (your original behavior)
     for _, tower in ipairs(towerFolder:GetChildren()) do
         scanTower(tower)
     end
@@ -118,39 +222,66 @@ RunService.RenderStepped:Connect(function()
         local model = data.model
 
         if not model or not model.Parent then
-            data.espGui:Destroy()
+            if data.espGui then
+                data.espGui:Destroy()
+            end
             chestMap[chest] = nil
             continue
         end
 
-        if not model:FindFirstChildOfClass("ProximityPrompt") then
-            data.espGui:Destroy()
+        -- For normal chests we still require a ProximityPrompt; Ruby/EXPBook can skip it
+        if data.requirePrompt ~= false and not model:FindFirstChildOfClass("ProximityPrompt") then
+            if data.espGui then
+                data.espGui:Destroy()
+            end
             chestMap[chest] = nil
             continue
         end
 
-        -- Refresh down part color → chest type
+        -- Refresh down part color → chest type / color
+        local color
+        if data.colorResolver then
+            local ok, resolved = pcall(data.colorResolver)
+            if ok and typeof(resolved) == "Color3" then
+                color = resolved
+            end
+        end
+
         local down = data.down
         if down and down.Parent then
             local bcName = down.BrickColor.Name
-            data.chestType = ChestTypes[bcName] or "UnknownChest"
 
-            -- Optional: color outline and text with chest color
-            data.espLabel.TextColor3 = down.Color
-            data.outline.Color = down.Color
+            -- Only override chestType if it's a known chest color
+            if ChestTypes[bcName] then
+                data.chestType = ChestTypes[bcName]
+            end
+
+            -- Color outline and text with part color
+            color = color or down.Color
+        end
+
+        if color then
+            data.espLabel.TextColor3 = color
+            data.outline.Color = color
         end
 
         -- Distance logic
-        local dist = (data.primary.Position - hrp.Position).Magnitude
-        local inRange = dist <= MAX_DISTANCE
-        data.espGui.Enabled = inRange
+        local primary = data.primary
+        if primary and primary.Parent and hrp then
+            local dist = (primary.Position - hrp.Position).Magnitude
+            local inRange = dist <= MAX_DISTANCE
+            data.espGui.Enabled = inRange
 
-        if inRange then
-            data.espLabel.Text = string.format(
-                "%s\n%d studs",
-                data.chestType,
-                dist
-            )
+            if inRange then
+                data.espLabel.Text = string.format(
+                    "%s\n%d studs",
+                    data.chestType,
+                    dist
+                )
+            end
+        else
+            -- If primary part disappears, hide ESP
+            data.espGui.Enabled = false
         end
     end
 end)
