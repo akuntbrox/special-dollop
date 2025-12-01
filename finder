@@ -164,6 +164,66 @@ local function readDescTextValue(desc)
     return nil
 end
 
+local function parseColorString(str)
+    if type(str) ~= "string" then return nil end
+
+    local numbers = {}
+    for token in string.gmatch(str, "[%-%d%.]+") do
+        local num = tonumber(token)
+        if num then
+            table.insert(numbers, num)
+        end
+    end
+
+    if #numbers < 3 then
+        return nil
+    end
+
+    local startIndex = 1
+    if #numbers >= 4 then
+        if (#numbers % 4 == 0) or (#numbers % 5 == 0) then
+            startIndex = 2
+        end
+    end
+
+    local r = math.clamp(numbers[startIndex] or 0, 0, 1)
+    local g = math.clamp(numbers[startIndex + 1] or r, 0, 1)
+    local b = math.clamp(numbers[startIndex + 2] or g, 0, 1)
+    return Color3.new(r, g, b)
+end
+
+local function colorFromAttribute(value)
+    local valueType = typeof(value)
+    if valueType == "Color3" then
+        return value
+    elseif valueType == "ColorSequence" then
+        return value:Evaluate(0.5)
+    elseif valueType == "BrickColor" then
+        return value.Color
+    elseif valueType == "Vector3" then
+        return Color3.new(
+            math.clamp(value.X, 0, 1),
+            math.clamp(value.Y, 0, 1),
+            math.clamp(value.Z, 0, 1)
+        )
+    elseif valueType == "table" then
+        local r = value.R or value.r or value[1]
+        local g = value.G or value.g or value[2]
+        local b = value.B or value.b or value[3]
+        if typeof(r) == "number" and typeof(g) == "number" and typeof(b) == "number" then
+            return Color3.new(
+                math.clamp(r, 0, 1),
+                math.clamp(g, 0, 1),
+                math.clamp(b, 0, 1)
+            )
+        end
+    elseif valueType == "string" then
+        return parseColorString(value)
+    end
+
+    return nil
+end
+
 local function registerBagOfGold(node)
     if not (node:IsA("Model") or node:IsA("BasePart")) then return end
 
@@ -198,8 +258,9 @@ local function registerBagOfGold(node)
         end
 
         if raysPart then
-            local attrColor = raysPart:GetAttribute("AppearanceColor") or raysPart:GetAttribute("Color")
-            if typeof(attrColor) == "Color3" then
+            local attrValue = raysPart:GetAttribute("AppearanceColor") or raysPart:GetAttribute("Color")
+            local attrColor = attrValue and colorFromAttribute(attrValue)
+            if attrColor then
                 return attrColor
             end
             return raysPart.Color
