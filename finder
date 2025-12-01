@@ -20,7 +20,7 @@ local ChestTypes = {
     ["Mulberry"] = "EpicChest",
     ["CGA brown"] = "LegendaryChest",
     ["Maroon"] = "MythicChest",
-    ["Dark royal blue"] = "RareChest",
+    ["Dark Royal blue"] = "RareChest",
     ["Earth green"] = "UncommonChest",
 }
 
