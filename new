@@ -2,6 +2,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local localPlayer = Players.LocalPlayer
 
@@ -9,12 +10,9 @@ local localPlayer = Players.LocalPlayer
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
 
 local Window = Rayfield:CreateWindow({
-    Name = "DL HrafnHub",
-    ShowText = "UI HrafnHub",
-    LoadingTitle = "Spinning up arctic circuits...",
-	LoadingSubtitle = "by HrafnHub",
-    DisableRayfieldPrompts = true,
-	DisableBuildWarnings = true,
+    Name = "Follow Controller",
+    LoadingTitle = "Follow Script",
+    LoadingSubtitle = "Rayfield UI",
     ConfigurationSaving = {
         Enabled = true,
         FolderName = "FollowScriptConfigs", -- config folder
@@ -41,16 +39,19 @@ local IS_LOBBY = (game.PlaceId == LOBBY_PLACE_ID)
 
 -- these will be overridden by Rayfield config if present
 local TARGET_USERNAME = "-"
-local STOP_DISTANCE = 4
+local STOP_DISTANCE
 local FOLLOW_SPEED  = 16.24
 
-local PROXIMITY_DETECTION_RADIUS = 4
+local PROXIMITY_DETECTION_RADIUS = 5
 local INTERACT_COOLDOWN = 1
 
 local PORTAL_DELAY_BEFORE_USE = 2
 local MIN_MOVE_AFTER_PORTAL = 20
 
 local RUN_ANIMATION_ID = 507767714 -- walk/run anim
+
+local STUCK_RADIUS = 200
+local IMSTUCK_COOLDOWN = 5
 
 --------------------------------------------------------
 -- INTERNAL STATE
@@ -66,6 +67,10 @@ local lastRootPos = nil
 local distanceMovedSincePortal = 0
 
 local followEnabled = true
+local autoImStuckEnabled = false
+local lastStuckTime = 0
+
+local imStuckEvent = ReplicatedStorage:WaitForChild("Events", 10):WaitForChild("ImStuck", 10)
 
 --------------------------------------------------------
 -- ANIMATION (Humanoid.Running hooked)
@@ -172,6 +177,15 @@ local FollowToggle = MainTab:CreateToggle({
     end,
 })
 
+local AutoImStuckToggle = MainTab:CreateToggle({
+    Name = "Auto I'm Stuck",
+    CurrentValue = autoImStuckEnabled,
+    Flag = "Follow_Auto_ImStuck",
+    Callback = function(Value)
+        autoImStuckEnabled = Value
+    end,
+})
+
 local StopDistanceSlider = MainTab:CreateSlider({
     Name = "Stop Distance",
     Range = {3, 20},
@@ -216,6 +230,14 @@ task.defer(function()
         end
     end
 
+    if flags and flags["Follow_Auto_ImStuck"] then
+        local savedAuto = flags["Follow_Auto_ImStuck"].CurrentValue
+        if typeof(savedAuto) == "boolean" then
+            autoImStuckEnabled = savedAuto
+            AutoImStuckToggle:Set(autoImStuckEnabled)
+        end
+    end
+
     if flags and flags["Follow_Stop_Distance"] then
         local savedStop = flags["Follow_Stop_Distance"].CurrentValue
         if typeof(savedStop) == "number" then
@@ -237,6 +259,44 @@ local function registerPrompt(prompt)
     if prompt:IsA("ProximityPrompt") then
         table.insert(proximityPrompts, prompt)
     end
+end
+
+local function getNearestLock(fromPos)
+    local towerFolder = Workspace:FindFirstChild("Tower")
+    if not towerFolder then
+        return nil, nil
+    end
+
+    local nearestLock = nil
+    local nearestDist = nil
+
+    for _, tower in ipairs(towerFolder:GetChildren()) do
+        local outFolder = tower:FindFirstChild("Out")
+        if not outFolder then
+            continue()
+        end
+
+        local portal = outFolder:FindFirstChild("Portal")
+        if not portal then
+            continue()
+        end
+
+        local lockContainer = portal:FindFirstChild("Lock")
+        if not lockContainer then
+            continue()
+        end
+
+        local lockPart = lockContainer:FindFirstChild("Lock")
+        if lockPart and lockPart:IsA("BasePart") then
+            local dist = (lockPart.Position - fromPos).Magnitude
+            if not nearestDist or dist < nearestDist then
+                nearestDist = dist
+                nearestLock = lockPart
+            end
+        end
+    end
+
+    return nearestLock, nearestDist
 end
 
 --------------------------------------------------------
@@ -392,4 +452,35 @@ RunService.Heartbeat:Connect(function()
 
     humanoid:MoveTo(targetRoot.Position)
     -- Walking animation handled via Humanoid.Running
+end)
+
+RunService.Heartbeat:Connect(function()
+    if not autoImStuckEnabled then
+        return
+    end
+
+    local character = localPlayer.Character
+    if not character then
+        return
+    end
+
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then
+        return
+    end
+
+    local nearestLock, dist = getNearestLock(hrp.Position)
+    if nearestLock and dist and dist <= STUCK_RADIUS then
+        return
+    end
+
+    local now = os.clock()
+    if now - lastStuckTime < IMSTUCK_COOLDOWN then
+        return
+    end
+
+    lastStuckTime = now
+    if imStuckEvent then
+        imStuckEvent:FireServer()
+    end
 end)
