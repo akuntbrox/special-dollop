@@ -39,7 +39,7 @@ local IS_LOBBY = (game.PlaceId == LOBBY_PLACE_ID)
 
 -- these will be overridden by Rayfield config if present
 local TARGET_USERNAME = "-"
-local STOP_DISTANCE
+local STOP_DISTANCE = 7
 local FOLLOW_SPEED  = 16.24
 
 local PROXIMITY_DETECTION_RADIUS = 5
