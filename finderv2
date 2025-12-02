@@ -5,7 +5,7 @@ local player = Players.LocalPlayer
 local towerFolder = workspace:WaitForChild("Tower")
 local charactersFolder = workspace:WaitForChild("Characters")
 
-local MAX_DISTANCE = 270 -- studs for ESP visibility
+local MAX_DISTANCE = 220 -- studs for ESP visibility
 local MERCENARY_TEAM_NAME = "Mercenary"
 local ENEMY_COLOR = Color3.fromRGB(255, 96, 96)
 
@@ -25,6 +25,7 @@ local chestMap = {}
 local enemyMap = {}
 local towerConnections = {}
 local characterConnections = {}
+local towerWatchers = {}
 
 local function safeDisconnect(conn)
     if conn then
@@ -411,6 +412,36 @@ local function registerBagOfGold(node)
     end)
 end
 
+towerWatchers["Chest"] = function(desc)
+    if desc:IsA("Model") then
+        registerChest(desc)
+    end
+end
+
+towerWatchers["SecretChest"] = function(desc)
+    if desc:IsA("Model") then
+        registerChest(desc)
+    end
+end
+
+towerWatchers["Ruby"] = function(desc)
+    if desc:IsA("MeshPart") then
+        registerRuby(desc)
+    end
+end
+
+towerWatchers["EXPBook"] = function(desc)
+    registerEXPBook(desc)
+end
+
+towerWatchers["GoldBag"] = function(desc)
+    registerBagOfGold(desc)
+end
+
+towerWatchers["BagOfGold"] = function(desc)
+    registerBagOfGold(desc)
+end
+
 local function registerEXPBook(expBook)
     if chestMap[expBook] then return end
     if not (expBook:IsA("BasePart") or expBook:IsA("Model")) then return end
@@ -640,25 +671,19 @@ local function attachTower(tower)
             return
         end
 
-        if desc:IsA("Model") then
-            if desc.Name == "Chest" or desc.Name == "SecretChest" then
-                registerChest(desc)
-            elseif desc.Name == "EXPBook" then
-                registerEXPBook(desc)
-            elseif desc.Name == "GoldBag" then
-                registerBagOfGold(desc)
-            end
-        elseif desc:IsA("MeshPart") and desc.Name == "Ruby" then
-            registerRuby(desc)
-        elseif desc:IsA("BasePart") then
+        local watcher = towerWatchers[desc.Name]
+        if watcher then
+            watcher(desc)
+            return
+        end
+
+        if desc:IsA("BasePart") or desc:IsA("ParticleEmitter") then
             local ancestor = desc.Parent
-            if ancestor and ancestor.Name == "GoldBag" then
-                registerBagOfGold(desc)
-            end
-        elseif desc:IsA("ParticleEmitter") then
-            local ancestor = desc.Parent
-            if ancestor and ancestor.Name == "GoldBag" then
-                registerBagOfGold(desc)
+            if ancestor then
+                local ancestorWatcher = towerWatchers[ancestor.Name]
+                if ancestorWatcher then
+                    ancestorWatcher(desc)
+                end
             end
         end
     end
