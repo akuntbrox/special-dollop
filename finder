@@ -5,6 +5,49 @@ local player = Players.LocalPlayer
 local towerFolder = workspace:WaitForChild("Tower")
 local MAX_DISTANCE = 200 -- studs
 
+-- Ensure ExitPortal prompt doesn't require more than 2s hold
+local function setExitPortalHoldDuration(towerNumber)
+    local towerName = tostring(towerNumber)
+    local targetTower = towerFolder:FindFirstChild(towerName)
+    if not targetTower then return end
+
+    local exitPortal = targetTower:FindFirstChild("ExitPortal")
+    if not exitPortal then return end
+
+    local prompt = exitPortal:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt then return end
+
+    if prompt:GetAttribute("HoldDuration") ~= 2 then
+        prompt:SetAttribute("HoldDuration", 2)
+    end
+
+    local ok, holdDuration = pcall(function()
+        return prompt.HoldDuration
+    end)
+
+    if ok and typeof(holdDuration) == "number" and holdDuration ~= 2 then
+        prompt.HoldDuration = 2
+    end
+end
+
+local function ensureExitPrompts()
+    for _, tower in ipairs(towerFolder:GetChildren()) do
+        if tonumber(tower.Name) then
+            setExitPortalHoldDuration(tower.Name)
+        end
+    end
+end
+
+ensureExitPrompts()
+
+towerFolder.ChildAdded:Connect(function(child)
+    if tonumber(child.Name) then
+        setExitPortalHoldDuration(child.Name)
+    end
+end)
+
+RunService.Heartbeat:Connect(ensureExitPrompts)
+
 -- Get player HRP
 local function getHRP()
     local character = player.Character or player.CharacterAdded:Wait()
