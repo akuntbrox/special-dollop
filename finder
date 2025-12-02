@@ -3,10 +3,7 @@ local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
 local towerFolder = workspace:WaitForChild("Tower")
-local charactersFolder = workspace:WaitForChild("Characters")
-local MAX_DISTANCE = 200 -- studs
-local MERCENARY_TEAM_NAME = "Mercenary"
-local ENEMY_COLOR = Color3.fromRGB(255, 96, 96)
+local MAX_DISTANCE = 250 -- studs
 
 -- Ensure ExitPortal prompt doesn't require more than 2s hold
 local function setExitPortalHoldDuration(towerNumber)
@@ -74,7 +71,6 @@ local RUBY_COLOR = Color3.fromRGB(255, 0, 0)
 
 -- All tracked ESPs
 local chestMap = {}
-local enemyMap = {}
 
 -- Create fancy ESP (works on any BasePart / MeshPart)
 local function createESP(adornee)
@@ -433,65 +429,6 @@ local function registerEXPBook(expBook)
     }
 end
 
-local function isMercenary(character)
-    local teamValue = character:GetAttribute("Team")
-    if teamValue == nil then
-        return false
-    end
-
-    return tostring(teamValue) == MERCENARY_TEAM_NAME
-end
-
-local function resolveEnemyRoot(character)
-    if not character then
-        return nil
-    end
-
-    if character:IsA("Model") then
-        return character:FindFirstChild("HumanoidRootPart")
-            or character.PrimaryPart
-            or character:FindFirstChildWhichIsA("BasePart")
-    elseif character:IsA("BasePart") then
-        return character
-    end
-
-    return nil
-end
-
-local function destroyEnemyESP(character)
-    local data = enemyMap[character]
-    if not data then
-        return
-    end
-
-    if data.espGui then
-        data.espGui:Destroy()
-    end
-
-    enemyMap[character] = nil
-end
-
-local function registerEnemy(character)
-    if enemyMap[character] then return end
-    if not character:IsA("Model") then return end
-    if not isMercenary(character) then return end
-
-    local root = resolveEnemyRoot(character)
-    if not root then return end
-
-    local espGui, espLabel, stroke = createESP(root)
-    espGui.Name = "EnemyESP"
-
-    enemyMap[character] = {
-        model = character,
-        root = root,
-        humanoid = character:FindFirstChildOfClass("Humanoid"),
-        espGui = espGui,
-        espLabel = espLabel,
-        outline = stroke,
-    }
-end
-
 -- Validate & load tower
 local function scanTower(tower)
     if not tonumber(tower.Name) and tower.Name ~= "N" then return end
@@ -611,61 +548,5 @@ RunService.RenderStepped:Connect(function()
             -- If primary part disappears, hide ESP
             data.espGui.Enabled = false
         end
-    end
-
-    for _, character in ipairs(charactersFolder:GetChildren()) do
-        if isMercenary(character) then
-            registerEnemy(character)
-        end
-    end
-
-    for character, data in pairs(enemyMap) do
-        if not character or not character.Parent or not isMercenary(character) then
-            destroyEnemyESP(character)
-            continue
-        end
-
-        local root = data.root
-        if not root or not root.Parent then
-            destroyEnemyESP(character)
-            if isMercenary(character) then
-                registerEnemy(character)
-            end
-            continue
-        end
-
-        local humanoid = data.humanoid
-        if not humanoid or not humanoid.Parent then
-            humanoid = character:FindFirstChildOfClass("Humanoid")
-            data.humanoid = humanoid
-        end
-
-        local distance = hrp and (root.Position - hrp.Position).Magnitude or nil
-        if not distance then
-            data.espGui.Enabled = false
-            continue
-        end
-
-        data.espGui.Enabled = true
-        data.espLabel.TextColor3 = ENEMY_COLOR
-        data.outline.Color = ENEMY_COLOR
-
-        local levelValue = character:GetAttribute("Level")
-        local levelText = levelValue and tostring(levelValue) or "?"
-
-        local hpText = "HP: ?"
-        if humanoid then
-            local health = math.floor(humanoid.Health + 0.5)
-            local maxHealth = math.floor(humanoid.MaxHealth + 0.5)
-            hpText = string.format("HP: %d/%d", health, maxHealth)
-        end
-
-        data.espLabel.Text = string.format(
-            "%s [Lv.%s]\n%s\n%d studs",
-            character.Name,
-            levelText,
-            hpText,
-            math.floor(distance + 0.5)
-        )
     end
 end)
