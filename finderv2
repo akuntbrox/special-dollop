@@ -5,7 +5,7 @@ local player = Players.LocalPlayer
 local towerFolder = workspace:WaitForChild("Tower")
 local charactersFolder = workspace:WaitForChild("Characters")
 
-local MAX_DISTANCE = 200 -- studs for ESP visibility
+local MAX_DISTANCE = 270 -- studs for ESP visibility
 local MERCENARY_TEAM_NAME = "Mercenary"
 local ENEMY_COLOR = Color3.fromRGB(255, 96, 96)
 
@@ -504,7 +504,7 @@ end
 local function registerEnemy(character)
     if enemyMap[character] then return end
     if not character:IsA("Model") then return end
-    if not isMercenary(character) then return end
+    if isMercenary(character) then return end
 
     local root = resolveEnemyRoot(character)
     if not root then return end
@@ -583,7 +583,7 @@ end
 
 local function updateEnemyEntries()
     for character, data in pairs(enemyMap) do
-        if not character or not character.Parent or not isMercenary(character) then
+        if not character or not character.Parent or isMercenary(character) then
             destroyEnemyESP(character)
             continue
         end
@@ -697,7 +697,7 @@ local function monitorCharacter(character)
     end
 
     local function reassess()
-        if isMercenary(character) then
+        if not isMercenary(character) then
             registerEnemy(character)
         else
             destroyEnemyESP(character)
@@ -707,7 +707,7 @@ local function monitorCharacter(character)
     characterConnections[character] = {
         team = character:GetAttributeChangedSignal("Team"):Connect(reassess),
         child = character.ChildAdded:Connect(function()
-            if isMercenary(character) then
+            if not isMercenary(character) then
                 registerEnemy(character)
             end
         end),
