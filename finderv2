@@ -5,7 +5,8 @@ local player = Players.LocalPlayer
 local towerFolder = workspace:WaitForChild("Tower")
 local charactersFolder = workspace:WaitForChild("Characters")
 
-local MAX_DISTANCE = 220 -- studs for ESP visibility
+local MAX_DISTANCE = 230 -- studs for chest-related ESP visibility
+local ENEMY_MAX_DISTANCE = 700 -- studs for enemy ESP visibility
 local MERCENARY_TEAM_NAME = "Mercenary"
 local ENEMY_COLOR = Color3.fromRGB(255, 96, 96)
 
@@ -638,7 +639,13 @@ local function updateEnemyEntries()
         end
 
         local distance = (root.Position - hrp.Position).Magnitude
-        data.espGui.Enabled = true
+        local inRange = distance <= ENEMY_MAX_DISTANCE
+        data.espGui.Enabled = inRange
+
+        if not inRange then
+            continue
+        end
+
         data.espLabel.TextColor3 = ENEMY_COLOR
         data.outline.Color = ENEMY_COLOR
 
