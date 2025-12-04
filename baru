@@ -953,6 +953,21 @@ end
 
 towerFolder.ChildAdded:Connect(attachTower)
 
+local lastTowerHeartbeat = 0
+RunService.Heartbeat:Connect(function()
+    local now = os.clock()
+    if now - lastTowerHeartbeat < 0.5 then
+        return
+    end
+    lastTowerHeartbeat = now
+
+    for _, tower in ipairs(towerFolder:GetChildren()) do
+        if (tonumber(tower.Name) or tower.Name == "N") and not towerConnections[tower] then
+            attachTower(tower)
+        end
+    end
+end)
+
 local function detachCharacter(character)
     cleanupConnectionBucket(characterConnections[character])
     characterConnections[character] = nil
