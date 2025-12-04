@@ -3,7 +3,7 @@ local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
 
 local towerFolder = workspace:WaitForChild("Tower")
-local MAX_DISTANCE = 250 -- studs
+local MAX_DISTANCE = 500 -- studs
 
 -- Ensure ExitPortal prompt doesn't require more than 2s hold
 local function setExitPortalHoldDuration(towerNumber)
