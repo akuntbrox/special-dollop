@@ -308,27 +308,37 @@ end
 
 local function registerChest(chest)
     if chestMap[chest] then return end
-    if not chest:IsA("Model") or not chest.PrimaryPart then return end
+    if not chest:IsA("Model") then return end
 
     local down = chest:FindFirstChild("Down")
-    if not (down and down:IsA("BasePart")) then return end
+    if not (down and down:IsA("BasePart")) then
+        down = nil
+    end
 
-    local prompt = chest:FindFirstChildOfClass("ProximityPrompt")
+    local highlightPart = chest.PrimaryPart
+        or down
+        or chest:FindFirstChildWhichIsA("BasePart")
+    if not (highlightPart and highlightPart:IsA("BasePart")) then
+        return
+    end
+
+    local prompt = chest:FindFirstChildWhichIsA("ProximityPrompt", true)
     if not prompt then return end
 
-    local bcName = down.BrickColor.Name
+    local bcName = down and down.BrickColor and down.BrickColor.Name or highlightPart.BrickColor.Name
     local chestType = ChestTypes[bcName] or "UnknownChest"
 
-    local espGui, espLabel, stroke = createESP(chest.PrimaryPart, "ChestESP")
+    local espGui, espLabel, stroke = createESP(highlightPart, "ChestESP")
     chestMap[chest] = {
         model = chest,
-        primary = chest.PrimaryPart,
-        down = down,
+        primary = highlightPart,
+        down = down or highlightPart,
         espGui = espGui,
         espLabel = espLabel,
         outline = stroke,
         chestType = chestType,
         requirePrompt = true,
+        promptInstance = prompt,
     }
 
     chestMap[chest].destroyConn = chest.Destroying:Connect(function()
@@ -361,16 +371,43 @@ local function registerRuby(ruby)
 end
 
 local function findExpBookDesc(expBook)
-    local right = expBook:FindFirstChild("Right")
-    if not right then return nil end
+    if not expBook then
+        return nil
+    end
 
-    local surfaceGui = right:FindFirstChildOfClass("SurfaceGui") or right:FindFirstChild("SurfaceGui")
+    local directDesc = expBook:FindFirstChild("Desc", true)
+    if directDesc and directDesc:IsA("TextLabel") then
+        return directDesc
+    end
+
+    local right = expBook:FindFirstChild("Right")
+    local surfaceGui
+    if right then
+        surfaceGui = right:FindFirstChildWhichIsA("SurfaceGui", true)
+            or right:FindFirstChildOfClass("SurfaceGui")
+            or right:FindFirstChild("SurfaceGui")
+    end
+
+    if not surfaceGui then
+        surfaceGui = expBook:FindFirstChildWhichIsA("SurfaceGui", true)
+    end
     if not surfaceGui then return nil end
 
-    local expFrame = surfaceGui:FindFirstChild("EXP")
-    if not expFrame then return nil end
+    local expFrame = surfaceGui:FindFirstChild("EXP") or surfaceGui:FindFirstChild("Exp")
+    if expFrame then
+        local desc = expFrame:FindFirstChild("Desc") or expFrame:FindFirstChild("Description")
+        if desc and desc:IsA("TextLabel") then
+            return desc
+        end
+    end
 
-    return expFrame:FindFirstChild("Desc")
+    for _, descendant in ipairs(surfaceGui:GetDescendants()) do
+        if descendant.Name == "Desc" and descendant:IsA("TextLabel") then
+            return descendant
+        end
+    end
+
+    return nil
 end
 
 local function readDescTextColor(desc)
@@ -595,9 +632,13 @@ towerWatchers["Ruby"] = function(desc)
     end
 end
 
-towerWatchers["EXPBook"] = function(desc)
+local function handleExpBook(desc)
     registerEXPBook(desc)
 end
+
+towerWatchers["EXPBook"] = handleExpBook
+towerWatchers["ExpBook"] = handleExpBook
+towerWatchers["Expbook"] = handleExpBook
 
 towerWatchers["GoldBag"] = function(desc)
     registerBagOfGold(desc)
@@ -734,7 +775,11 @@ local function updateChestEntries()
         end
 
         if data.requirePrompt ~= false then
-            local prompt = model:FindFirstChildOfClass("ProximityPrompt")
+            local prompt = data.promptInstance
+            if not (prompt and prompt.Parent) then
+                prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
+                data.promptInstance = prompt
+            end
             if not prompt then
                 destroyChestESP(chest)
                 continue
@@ -860,9 +905,21 @@ local function attachTower(tower)
             return
         end
 
-        local watcher = towerWatchers[desc.Name]
+        local name = desc.Name or ""
+        local watcher = towerWatchers[name]
         if watcher then
             watcher(desc)
+            return
+        end
+
+        local lowerName = string.lower(name)
+        if desc:IsA("Model") and lowerName:find("chest", 1, true) then
+            registerChest(desc)
+            return
+        end
+
+        if (desc:IsA("Model") or desc:IsA("BasePart")) and lowerName:find("exp", 1, true) and lowerName:find("book", 1, true) then
+            registerEXPBook(desc)
             return
         end
 
