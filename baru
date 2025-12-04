@@ -35,6 +35,7 @@ local towerConnections = {}
 local characterConnections = {}
 local towerWatchers = {}
 local ensureExitPrompts
+local registerEXPBook
 
 -- UI state references (set below after Rayfield loads)
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
@@ -606,7 +607,7 @@ towerWatchers["BagOfGold"] = function(desc)
     registerBagOfGold(desc)
 end
 
-local function registerEXPBook(expBook)
+registerEXPBook = function(expBook)
     if chestMap[expBook] then return end
     if not (expBook:IsA("BasePart") or expBook:IsA("Model")) then return end
 
