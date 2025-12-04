@@ -31,7 +31,6 @@ local RUBY_COLOR = Color3.fromRGB(255, 0, 0)
 
 local chestMap = {}
 local enemyMap = {}
-local towerConnections = {}
 local characterConnections = {}
 local towerWatchers = {}
 local ensureExitPrompts
@@ -648,6 +647,73 @@ towerWatchers["BagOfGold"] = function(desc)
     registerBagOfGold(desc)
 end
 
+local function handleTowerDescendant(desc)
+    if not desc or not desc.Parent then
+        return
+    end
+
+    local name = desc.Name or ""
+    local watcher = towerWatchers[name]
+    if watcher then
+        watcher(desc)
+        return
+    end
+
+    local lowerName = string.lower(name)
+    if desc:IsA("Model") and lowerName:find("chest", 1, true) then
+        registerChest(desc)
+        return
+    end
+
+    if (desc:IsA("Model") or desc:IsA("BasePart")) and lowerName:find("exp", 1, true) and lowerName:find("book", 1, true) then
+        registerEXPBook(desc)
+        return
+    end
+
+    if desc:IsA("BasePart") or desc:IsA("ParticleEmitter") then
+        local ancestor = desc.Parent
+        if ancestor then
+            local ancestorWatcher = towerWatchers[ancestor.Name]
+            if ancestorWatcher then
+                ancestorWatcher(desc)
+            end
+        end
+    end
+end
+
+local function scanTower(tower)
+    if not tower or not tower.Parent then
+        return
+    end
+    if not tonumber(tower.Name) and tower.Name ~= "N" then
+        return
+    end
+
+    for _, descendant in ipairs(tower:GetDescendants()) do
+        handleTowerDescendant(descendant)
+    end
+end
+
+for _, tower in ipairs(towerFolder:GetChildren()) do
+    scanTower(tower)
+end
+
+towerFolder.ChildAdded:Connect(scanTower)
+
+local lastTowerScan = 0
+local TOWER_RESCAN_INTERVAL = 0.5
+RunService.Heartbeat:Connect(function()
+    local now = os.clock()
+    if now - lastTowerScan < TOWER_RESCAN_INTERVAL then
+        return
+    end
+    lastTowerScan = now
+
+    for _, tower in ipairs(towerFolder:GetChildren()) do
+        scanTower(tower)
+    end
+end)
+
 registerEXPBook = function(expBook)
     if chestMap[expBook] then return end
     if not (expBook:IsA("BasePart") or expBook:IsA("Model")) then return end
@@ -895,78 +961,6 @@ local function updateEnemyEntries()
         )
     end
 end
-
-local function attachTower(tower)
-    if towerConnections[tower] then return end
-    if not tonumber(tower.Name) and tower.Name ~= "N" then return end
-
-    local function handleDescendant(desc)
-        if not desc or not desc.Parent then
-            return
-        end
-
-        local name = desc.Name or ""
-        local watcher = towerWatchers[name]
-        if watcher then
-            watcher(desc)
-            return
-        end
-
-        local lowerName = string.lower(name)
-        if desc:IsA("Model") and lowerName:find("chest", 1, true) then
-            registerChest(desc)
-            return
-        end
-
-        if (desc:IsA("Model") or desc:IsA("BasePart")) and lowerName:find("exp", 1, true) and lowerName:find("book", 1, true) then
-            registerEXPBook(desc)
-            return
-        end
-
-        if desc:IsA("BasePart") or desc:IsA("ParticleEmitter") then
-            local ancestor = desc.Parent
-            if ancestor then
-                local ancestorWatcher = towerWatchers[ancestor.Name]
-                if ancestorWatcher then
-                    ancestorWatcher(desc)
-                end
-            end
-        end
-    end
-
-    for _, descendant in ipairs(tower:GetDescendants()) do
-        handleDescendant(descendant)
-    end
-
-    towerConnections[tower] = {
-        desc = tower.DescendantAdded:Connect(handleDescendant),
-        destroy = tower.Destroying:Connect(function()
-            cleanupConnectionBucket(towerConnections[tower])
-            towerConnections[tower] = nil
-        end),
-    }
-end
-
-for _, tower in ipairs(towerFolder:GetChildren()) do
-    attachTower(tower)
-end
-
-towerFolder.ChildAdded:Connect(attachTower)
-
-local lastTowerHeartbeat = 0
-RunService.Heartbeat:Connect(function()
-    local now = os.clock()
-    if now - lastTowerHeartbeat < 0.5 then
-        return
-    end
-    lastTowerHeartbeat = now
-
-    for _, tower in ipairs(towerFolder:GetChildren()) do
-        if (tonumber(tower.Name) or tower.Name == "N") and not towerConnections[tower] then
-            attachTower(tower)
-        end
-    end
-end)
 
 local function detachCharacter(character)
     cleanupConnectionBucket(characterConnections[character])
