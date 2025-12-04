@@ -1,0 +1,949 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+local towerFolder = workspace:WaitForChild("Tower")
+local charactersFolder = workspace:WaitForChild("Characters")
+
+local DEFAULT_CHEST_DISTANCE = 400
+local DEFAULT_ENEMY_DISTANCE = 700
+
+local chestESPEnabled = true
+local enemyESPEnabled = true
+local exitPortalFixEnabled = true
+local chestMaxDistance = DEFAULT_CHEST_DISTANCE
+local enemyMaxDistance = DEFAULT_ENEMY_DISTANCE
+
+local MERCENARY_TEAM_NAME = "Mercenary"
+local ENEMY_COLOR = Color3.fromRGB(255, 96, 96)
+
+local ChestTypes = {
+    ["Really black"] = "CursedChest",
+    ["Dark stone grey"] = "CommonChest",
+    ["Mulberry"] = "EpicChest",
+    ["CGA brown"] = "LegendaryChest",
+    ["Maroon"] = "MythicChest",
+    ["Dark Royal blue"] = "RareChest",
+    ["Earth green"] = "UncommonChest",
+}
+
+local RUBY_COLOR = Color3.fromRGB(255, 0, 0)
+
+local chestMap = {}
+local enemyMap = {}
+local towerConnections = {}
+local characterConnections = {}
+local towerWatchers = {}
+local ensureExitPrompts
+
+-- UI state references (set below after Rayfield loads)
+local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "DL ESP Suite",
+    LoadingTitle = "DL ESP Suite",
+    LoadingSubtitle = "by HrafnHub",
+    DisableRayfieldPrompts = true,
+    DisableBuildWarnings = true,
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "DLConfigs",
+        FileName = "DL_ESPSettings",
+    },
+    Discord = {
+        Enabled = false,
+        Invite = "",
+        RememberJoins = false,
+    },
+    KeySystem = false,
+})
+
+local ControlTab = Window:CreateTab("ESP", 4483362458)
+
+local ChestToggle
+local EnemyToggle
+local ExitToggle
+local ChestDistanceSlider
+local EnemyDistanceSlider
+
+ChestToggle = ControlTab:CreateToggle({
+    Name = "Chest ESP",
+    CurrentValue = chestESPEnabled,
+    Flag = "DL_ChestESP",
+    Callback = function(Value)
+        chestESPEnabled = Value
+    end,
+})
+
+EnemyToggle = ControlTab:CreateToggle({
+    Name = "Enemy ESP",
+    CurrentValue = enemyESPEnabled,
+    Flag = "DL_EnemyESP",
+    Callback = function(Value)
+        enemyESPEnabled = Value
+    end,
+})
+
+ExitToggle = ControlTab:CreateToggle({
+    Name = "Exit Portal Fix",
+    CurrentValue = exitPortalFixEnabled,
+    Flag = "DL_ExitPortalFix",
+    Callback = function(Value)
+        exitPortalFixEnabled = Value
+        if exitPortalFixEnabled and ensureExitPrompts then
+            ensureExitPrompts()
+        end
+    end,
+})
+
+ChestDistanceSlider = ControlTab:CreateSlider({
+    Name = "Chest ESP Distance",
+    Range = {150, 1200},
+    Increment = 10,
+    Suffix = " studs",
+    CurrentValue = chestMaxDistance,
+    Flag = "DL_ChestDistance",
+    Callback = function(Value)
+        chestMaxDistance = math.clamp(Value, 150, 1200)
+    end,
+})
+
+EnemyDistanceSlider = ControlTab:CreateSlider({
+    Name = "Enemy ESP Distance",
+    Range = {200, 1500},
+    Increment = 10,
+    Suffix = " studs",
+    CurrentValue = enemyMaxDistance,
+    Flag = "DL_EnemyDistance",
+    Callback = function(Value)
+        enemyMaxDistance = math.clamp(Value, 200, 1500)
+    end,
+})
+
+ControlTab:CreateParagraph({
+    Title = "Tips",
+    Content = "Customize ranges & toggles. Settings auto-save."
+})
+
+Rayfield:LoadConfiguration()
+
+task.defer(function()
+    local flags = Rayfield.Flags
+    if not flags then
+        return
+    end
+
+    if flags["DL_ChestESP"] and typeof(flags["DL_ChestESP"].CurrentValue) == "boolean" then
+        chestESPEnabled = flags["DL_ChestESP"].CurrentValue
+        ChestToggle:Set(chestESPEnabled)
+    end
+
+    if flags["DL_EnemyESP"] and typeof(flags["DL_EnemyESP"].CurrentValue) == "boolean" then
+        enemyESPEnabled = flags["DL_EnemyESP"].CurrentValue
+        EnemyToggle:Set(enemyESPEnabled)
+    end
+
+    if flags["DL_ExitPortalFix"] and typeof(flags["DL_ExitPortalFix"].CurrentValue) == "boolean" then
+        exitPortalFixEnabled = flags["DL_ExitPortalFix"].CurrentValue
+        ExitToggle:Set(exitPortalFixEnabled)
+        if exitPortalFixEnabled and ensureExitPrompts then
+            ensureExitPrompts()
+        end
+    end
+
+    if flags["DL_ChestDistance"] and typeof(flags["DL_ChestDistance"].CurrentValue) == "number" then
+        chestMaxDistance = math.clamp(flags["DL_ChestDistance"].CurrentValue, 150, 1200)
+        ChestDistanceSlider:Set(chestMaxDistance)
+    end
+
+    if flags["DL_EnemyDistance"] and typeof(flags["DL_EnemyDistance"].CurrentValue) == "number" then
+        enemyMaxDistance = math.clamp(flags["DL_EnemyDistance"].CurrentValue, 200, 1500)
+        EnemyDistanceSlider:Set(enemyMaxDistance)
+    end
+end)
+
+local function safeDisconnect(conn)
+    if conn then
+        conn:Disconnect()
+    end
+end
+
+local function cleanupConnectionBucket(bucket)
+    if not bucket then
+        return
+    end
+    for _, conn in pairs(bucket) do
+        safeDisconnect(conn)
+    end
+end
+
+local function getHRP()
+    local character = player.Character or player.CharacterAdded:Wait()
+    return character:WaitForChild("HumanoidRootPart")
+end
+
+local hrp = getHRP()
+player.CharacterAdded:Connect(function()
+    hrp = getHRP()
+end)
+
+local function setExitPortalHoldDuration(towerNumber)
+    if not exitPortalFixEnabled then
+        return
+    end
+
+    local towerName = tostring(towerNumber)
+    local targetTower = towerFolder:FindFirstChild(towerName)
+    if not targetTower then return end
+
+    local exitPortal = targetTower:FindFirstChild("ExitPortal")
+    if not exitPortal then return end
+
+    local prompt = exitPortal:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt then return end
+
+    if prompt:GetAttribute("HoldDuration") ~= 2 then
+        prompt:SetAttribute("HoldDuration", 2)
+    end
+
+    local ok, holdDuration = pcall(function()
+        return prompt.HoldDuration
+    end)
+    if ok and typeof(holdDuration) == "number" and holdDuration ~= 2 then
+        prompt.HoldDuration = 2
+    end
+end
+
+for _, tower in ipairs(towerFolder:GetChildren()) do
+    if tonumber(tower.Name) then
+        setExitPortalHoldDuration(tower.Name)
+    end
+end
+
+towerFolder.ChildAdded:Connect(function(child)
+    if tonumber(child.Name) then
+        setExitPortalHoldDuration(child.Name)
+    end
+end)
+
+ensureExitPrompts = function()
+    if not exitPortalFixEnabled then
+        return
+    end
+
+    for _, tower in ipairs(towerFolder:GetChildren()) do
+        if tonumber(tower.Name) then
+            setExitPortalHoldDuration(tower.Name)
+        end
+    end
+end
+
+local lastPortalCheck = 0
+RunService.Heartbeat:Connect(function()
+    if not exitPortalFixEnabled then
+        return
+    end
+
+    local now = os.clock()
+    if now - lastPortalCheck >= 1 then
+        lastPortalCheck = now
+        ensureExitPrompts()
+    end
+end)
+
+local function createESP(adornee, name)
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = name or "ESP"
+    billboard.Adornee = adornee
+    billboard.Size = UDim2.new(0, 160, 0, 60)
+    billboard.StudsOffset = Vector3.new(0, 4, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = true
+
+    local bg = Instance.new("Frame")
+    bg.Parent = billboard
+    bg.Size = UDim2.new(1, 0, 1, 0)
+    bg.BackgroundColor3 = Color3.new(0, 0, 0)
+    bg.BackgroundTransparency = 0.3
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Parent = bg
+    stroke.Thickness = 2
+    stroke.Color = Color3.new(1, 1, 1)
+
+    Instance.new("UICorner", bg)
+
+    local label = Instance.new("TextLabel")
+    label.Parent = bg
+    label.Size = UDim2.new(1, -6, 1, -6)
+    label.Position = UDim2.new(0, 3, 0, 3)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.Font = Enum.Font.FredokaOne
+    label.TextScaled = true
+    label.TextStrokeTransparency = 0.3
+    label.TextStrokeColor3 = Color3.new(0, 0, 0)
+
+    billboard.Parent = adornee
+    return billboard, label, stroke
+end
+
+local function destroyChestESP(chest)
+    local data = chestMap[chest]
+    if not data then
+        return
+    end
+
+    if data.destroyConn then
+        safeDisconnect(data.destroyConn)
+    end
+
+    if data.espGui then
+        data.espGui:Destroy()
+    end
+
+    chestMap[chest] = nil
+end
+
+local function registerChest(chest)
+    if chestMap[chest] then return end
+    if not chest:IsA("Model") or not chest.PrimaryPart then return end
+
+    local down = chest:FindFirstChild("Down")
+    if not (down and down:IsA("BasePart")) then return end
+
+    local prompt = chest:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt then return end
+
+    local bcName = down.BrickColor.Name
+    local chestType = ChestTypes[bcName] or "UnknownChest"
+
+    local espGui, espLabel, stroke = createESP(chest.PrimaryPart, "ChestESP")
+    chestMap[chest] = {
+        model = chest,
+        primary = chest.PrimaryPart,
+        down = down,
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+        chestType = chestType,
+        requirePrompt = true,
+    }
+
+    chestMap[chest].destroyConn = chest.Destroying:Connect(function()
+        destroyChestESP(chest)
+    end)
+end
+
+local function registerRuby(ruby)
+    if chestMap[ruby] then return end
+    if not ruby:IsA("MeshPart") then return end
+
+    local espGui, espLabel, stroke = createESP(ruby, "ChestESP")
+    chestMap[ruby] = {
+        model = ruby,
+        primary = ruby,
+        down = nil,
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+        chestType = "Ruby",
+        requirePrompt = false,
+        colorResolver = function()
+            return RUBY_COLOR
+        end,
+    }
+
+    chestMap[ruby].destroyConn = ruby.Destroying:Connect(function()
+        destroyChestESP(ruby)
+    end)
+end
+
+local function findExpBookDesc(expBook)
+    local right = expBook:FindFirstChild("Right")
+    if not right then return nil end
+
+    local surfaceGui = right:FindFirstChildOfClass("SurfaceGui") or right:FindFirstChild("SurfaceGui")
+    if not surfaceGui then return nil end
+
+    local expFrame = surfaceGui:FindFirstChild("EXP")
+    if not expFrame then return nil end
+
+    return expFrame:FindFirstChild("Desc")
+end
+
+local function readDescTextColor(desc)
+    if not desc then return nil end
+
+    local attrColor = desc:GetAttribute("TextColor3")
+    if typeof(attrColor) == "Color3" then
+        return attrColor
+    end
+
+    local ok, textColor = pcall(function()
+        return desc.TextColor3
+    end)
+    if ok and typeof(textColor) == "Color3" then
+        return textColor
+    end
+
+    return nil
+end
+
+local function readDescTextValue(desc)
+    if not desc then return nil end
+
+    local attrText = desc:GetAttribute("Text")
+    if typeof(attrText) == "string" and attrText ~= "" then
+        return attrText
+    end
+
+    local ok, textValue = pcall(function()
+        return desc.Text
+    end)
+    if ok and typeof(textValue) == "string" and textValue ~= "" then
+        return textValue
+    end
+
+    return nil
+end
+
+local function parseColorString(str)
+    if type(str) ~= "string" then return nil end
+
+    local numbers = {}
+    for token in string.gmatch(str, "[%-%d%.]+") do
+        local num = tonumber(token)
+        if num then
+            table.insert(numbers, num)
+        end
+    end
+
+    if #numbers < 3 then
+        return nil
+    end
+
+    local startIndex = 1
+    if #numbers >= 4 then
+        if (#numbers % 4 == 0) or (#numbers % 5 == 0) then
+            startIndex = 2
+        end
+    end
+
+    local r = math.clamp(numbers[startIndex] or 0, 0, 1)
+    local g = math.clamp(numbers[startIndex + 1] or r, 0, 1)
+    local b = math.clamp(numbers[startIndex + 2] or g, 0, 1)
+    return Color3.new(r, g, b)
+end
+
+local function colorFromAttribute(value)
+    local valueType = typeof(value)
+    if valueType == "Color3" then
+        return value
+    elseif valueType == "ColorSequence" then
+        return value:Evaluate(0.5)
+    elseif valueType == "BrickColor" then
+        return value.Color
+    elseif valueType == "Vector3" then
+        return Color3.new(
+            math.clamp(value.X, 0, 1),
+            math.clamp(value.Y, 0, 1),
+            math.clamp(value.Z, 0, 1)
+        )
+    elseif valueType == "table" then
+        local r = value.R or value.r or value[1]
+        local g = value.G or value.g or value[2]
+        local b = value.B or value.b or value[3]
+        if typeof(r) == "number" and typeof(g) == "number" and typeof(b) == "number" then
+            return Color3.new(
+                math.clamp(r, 0, 1),
+                math.clamp(g, 0, 1),
+                math.clamp(b, 0, 1)
+            )
+        end
+    elseif valueType == "string" then
+        return parseColorString(value)
+    end
+
+    return nil
+end
+
+local function readInstanceColor(source)
+    if not source or not source.Parent then
+        return nil
+    end
+
+    local attrValue = source:GetAttribute("AppearanceColor") or source:GetAttribute("Color")
+    local attrColor = attrValue and colorFromAttribute(attrValue)
+    if attrColor then
+        return attrColor
+    end
+
+    if source:IsA("ParticleEmitter") then
+        local ok, seq = pcall(function()
+            return source.Color
+        end)
+        if ok and typeof(seq) == "ColorSequence" then
+            return seq:Evaluate(0.5)
+        end
+    elseif source:IsA("BasePart") then
+        return source.Color
+    end
+
+    return nil
+end
+
+local function registerBagOfGold(node)
+    if chestMap[node] then return end
+    if not (node:IsA("Model") or node:IsA("BasePart") or node:IsA("ParticleEmitter")) then return end
+
+    local bagRoot
+    local highlightPart
+    local function resolveBagModel(instance)
+        if instance:IsA("Model") then
+            return instance
+        end
+        return instance:FindFirstAncestorWhichIsA("Model")
+    end
+
+    bagRoot = resolveBagModel(node)
+    if not bagRoot then return end
+    if chestMap[bagRoot] then return end
+
+    if node:IsA("BasePart") then
+        highlightPart = node
+    else
+        highlightPart = bagRoot.PrimaryPart or bagRoot:FindFirstChildWhichIsA("BasePart")
+    end
+
+    if not (highlightPart and highlightPart:IsA("BasePart")) then
+        return
+    end
+
+    local espGui, espLabel, stroke = createESP(highlightPart, "ChestESP")
+
+    local function resolveBagColor()
+        if not (bagRoot and bagRoot.Parent) then
+            return highlightPart and highlightPart.Color or Color3.new(1, 1, 0)
+        end
+
+        local candidates = {}
+        local function addCandidate(inst)
+            if inst then
+                table.insert(candidates, inst)
+            end
+        end
+
+        addCandidate(bagRoot:FindFirstChild("Rays"))
+
+        local bagChildren = bagRoot:GetChildren()
+        if bagChildren[4] then
+            addCandidate(bagChildren[4])
+        end
+
+        for _, child in ipairs(bagChildren) do
+            if child:IsA("ParticleEmitter") then
+                addCandidate(child)
+            end
+        end
+
+        addCandidate(highlightPart)
+
+        for _, source in ipairs(candidates) do
+            local color = readInstanceColor(source)
+            if color then
+                return color
+            end
+        end
+
+        return highlightPart.Color
+    end
+
+    chestMap[bagRoot] = {
+        model = bagRoot,
+        primary = highlightPart,
+        down = nil,
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+        chestType = "BagOfGold",
+        requirePrompt = false,
+        colorResolver = resolveBagColor,
+    }
+
+    chestMap[bagRoot].destroyConn = bagRoot.Destroying:Connect(function()
+        destroyChestESP(bagRoot)
+    end)
+end
+
+towerWatchers["Chest"] = function(desc)
+    if desc:IsA("Model") then
+        registerChest(desc)
+    end
+end
+
+towerWatchers["SecretChest"] = function(desc)
+    if desc:IsA("Model") then
+        registerChest(desc)
+    end
+end
+
+towerWatchers["Ruby"] = function(desc)
+    if desc:IsA("MeshPart") then
+        registerRuby(desc)
+    end
+end
+
+towerWatchers["EXPBook"] = function(desc)
+    registerEXPBook(desc)
+end
+
+towerWatchers["GoldBag"] = function(desc)
+    registerBagOfGold(desc)
+end
+
+towerWatchers["BagOfGold"] = function(desc)
+    registerBagOfGold(desc)
+end
+
+local function registerEXPBook(expBook)
+    if chestMap[expBook] then return end
+    if not (expBook:IsA("BasePart") or expBook:IsA("Model")) then return end
+
+    local highlightPart
+    if expBook:IsA("BasePart") then
+        highlightPart = expBook
+    else
+        highlightPart = expBook.PrimaryPart or expBook:FindFirstChildWhichIsA("BasePart")
+    end
+
+    if not highlightPart then return end
+
+    local espGui, espLabel, stroke = createESP(highlightPart, "ChestESP")
+    local descRef = findExpBookDesc(expBook)
+
+    local function resolveExpColor()
+        if not descRef or not descRef.Parent then
+            descRef = findExpBookDesc(expBook)
+        end
+        return readDescTextColor(descRef) or highlightPart.Color
+    end
+
+    local function resolveExpLabel()
+        if not descRef or not descRef.Parent then
+            descRef = findExpBookDesc(expBook)
+        end
+
+        local descText = readDescTextValue(descRef)
+        if descText and descText ~= "" then
+            return string.format("EXPBook - %s", descText)
+        end
+        return "EXPBook"
+    end
+
+    chestMap[expBook] = {
+        model = expBook,
+        primary = highlightPart,
+        down = highlightPart,
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+        chestType = "EXPBook",
+        requirePrompt = false,
+        colorResolver = resolveExpColor,
+        labelResolver = resolveExpLabel,
+    }
+
+    chestMap[expBook].destroyConn = expBook.Destroying:Connect(function()
+        destroyChestESP(expBook)
+    end)
+end
+
+local function isMercenary(character)
+    local teamValue = character:GetAttribute("Team")
+    if teamValue == nil then
+        return false
+    end
+    return tostring(teamValue) == MERCENARY_TEAM_NAME
+end
+
+local function resolveEnemyRoot(character)
+    if not character then
+        return nil
+    end
+
+    if character:IsA("Model") then
+        return character:FindFirstChild("HumanoidRootPart")
+            or character.PrimaryPart
+            or character:FindFirstChildWhichIsA("BasePart")
+    elseif character:IsA("BasePart") then
+        return character
+    end
+
+    return nil
+end
+
+local function destroyEnemyESP(character)
+    local data = enemyMap[character]
+    if not data then
+        return
+    end
+
+    if data.espGui then
+        data.espGui:Destroy()
+    end
+
+    enemyMap[character] = nil
+end
+
+local function registerEnemy(character)
+    if enemyMap[character] then return end
+    if not character:IsA("Model") then return end
+    if isMercenary(character) then return end
+
+    local root = resolveEnemyRoot(character)
+    if not root then return end
+
+    local espGui, espLabel, stroke = createESP(root, "EnemyESP")
+    enemyMap[character] = {
+        model = character,
+        root = root,
+        humanoid = character:FindFirstChildOfClass("Humanoid"),
+        espGui = espGui,
+        espLabel = espLabel,
+        outline = stroke,
+    }
+end
+
+local function updateChestEntries()
+    if not chestESPEnabled then
+        for _, data in pairs(chestMap) do
+            if data.espGui then
+                data.espGui.Enabled = false
+            end
+        end
+        return
+    end
+
+    for chest, data in pairs(chestMap) do
+        local model = data.model
+        if not model or not model.Parent then
+            destroyChestESP(chest)
+            continue
+        end
+
+        if data.requirePrompt ~= false then
+            local prompt = model:FindFirstChildOfClass("ProximityPrompt")
+            if not prompt then
+                destroyChestESP(chest)
+                continue
+            end
+        end
+
+        local color
+        if data.colorResolver then
+            local ok, resolved = pcall(data.colorResolver)
+            if ok and typeof(resolved) == "Color3" then
+                color = resolved
+            end
+        end
+
+        local down = data.down
+        if down and down.Parent then
+            local bcName = down.BrickColor.Name
+            if ChestTypes[bcName] then
+                data.chestType = ChestTypes[bcName]
+            end
+            color = color or down.Color
+        end
+
+        if color then
+            data.espLabel.TextColor3 = color
+            data.outline.Color = color
+        end
+
+        local primary = data.primary
+        if primary and primary.Parent and hrp then
+            local dist = (primary.Position - hrp.Position).Magnitude
+            local inRange = dist <= chestMaxDistance
+            data.espGui.Enabled = inRange
+
+            if inRange then
+                local labelPrefix = data.chestType
+                if data.labelResolver then
+                    local okText, resolvedText = pcall(data.labelResolver)
+                    if okText and type(resolvedText) == "string" and resolvedText ~= "" then
+                        labelPrefix = resolvedText
+                    end
+                end
+
+                data.espLabel.Text = string.format("%s\n%d studs", labelPrefix, math.floor(dist + 0.5))
+            end
+        else
+            data.espGui.Enabled = false
+        end
+    end
+end
+
+local function updateEnemyEntries()
+    if not enemyESPEnabled then
+        for _, data in pairs(enemyMap) do
+            if data.espGui then
+                data.espGui.Enabled = false
+            end
+        end
+        return
+    end
+
+    for character, data in pairs(enemyMap) do
+        if not character or not character.Parent or isMercenary(character) then
+            destroyEnemyESP(character)
+            continue
+        end
+
+        local root = data.root
+        if not root or not root.Parent then
+            destroyEnemyESP(character)
+            registerEnemy(character)
+            continue
+        end
+
+        local humanoid = data.humanoid
+        if not humanoid or not humanoid.Parent then
+            humanoid = character:FindFirstChildOfClass("Humanoid")
+            data.humanoid = humanoid
+        end
+
+        if not hrp or not hrp.Parent then
+            data.espGui.Enabled = false
+            continue
+        end
+
+        local distance = (root.Position - hrp.Position).Magnitude
+        local inRange = distance <= enemyMaxDistance
+        data.espGui.Enabled = inRange
+
+        if not inRange then
+            continue
+        end
+
+        data.espLabel.TextColor3 = ENEMY_COLOR
+        data.outline.Color = ENEMY_COLOR
+
+        local levelValue = character:GetAttribute("Level")
+        local levelText = levelValue and tostring(levelValue) or "?"
+
+        local hpText = "HP: ?"
+        if humanoid then
+            local health = math.floor(humanoid.Health + 0.5)
+            local maxHealth = math.floor(humanoid.MaxHealth + 0.5)
+            hpText = string.format("HP: %d/%d", health, maxHealth)
+        end
+
+        data.espLabel.Text = string.format(
+            "%s [Lv.%s]\n%s\n%d studs",
+            character.Name,
+            levelText,
+            hpText,
+            math.floor(distance + 0.5)
+        )
+    end
+end
+
+local function attachTower(tower)
+    if towerConnections[tower] then return end
+    if not tonumber(tower.Name) and tower.Name ~= "N" then return end
+
+    local function handleDescendant(desc)
+        if not desc or not desc.Parent then
+            return
+        end
+
+        local watcher = towerWatchers[desc.Name]
+        if watcher then
+            watcher(desc)
+            return
+        end
+
+        if desc:IsA("BasePart") or desc:IsA("ParticleEmitter") then
+            local ancestor = desc.Parent
+            if ancestor then
+                local ancestorWatcher = towerWatchers[ancestor.Name]
+                if ancestorWatcher then
+                    ancestorWatcher(desc)
+                end
+            end
+        end
+    end
+
+    for _, descendant in ipairs(tower:GetDescendants()) do
+        handleDescendant(descendant)
+    end
+
+    towerConnections[tower] = {
+        desc = tower.DescendantAdded:Connect(handleDescendant),
+        destroy = tower.Destroying:Connect(function()
+            cleanupConnectionBucket(towerConnections[tower])
+            towerConnections[tower] = nil
+        end),
+    }
+end
+
+for _, tower in ipairs(towerFolder:GetChildren()) do
+    attachTower(tower)
+end
+
+towerFolder.ChildAdded:Connect(attachTower)
+
+local function detachCharacter(character)
+    cleanupConnectionBucket(characterConnections[character])
+    characterConnections[character] = nil
+    destroyEnemyESP(character)
+end
+
+local function monitorCharacter(character)
+    if not character:IsA("Model") then
+        return
+    end
+    if characterConnections[character] then
+        return
+    end
+
+    local function reassess()
+        if not isMercenary(character) then
+            registerEnemy(character)
+        else
+            destroyEnemyESP(character)
+        end
+    end
+
+    characterConnections[character] = {
+        team = character:GetAttributeChangedSignal("Team"):Connect(reassess),
+        child = character.ChildAdded:Connect(function()
+            if not isMercenary(character) then
+                registerEnemy(character)
+            end
+        end),
+        destroy = character.Destroying:Connect(function()
+            detachCharacter(character)
+        end),
+    }
+
+    reassess()
+end
+
+for _, character in ipairs(charactersFolder:GetChildren()) do
+    monitorCharacter(character)
+end
+
+charactersFolder.ChildAdded:Connect(monitorCharacter)
+charactersFolder.ChildRemoved:Connect(detachCharacter)
+
+RunService.RenderStepped:Connect(function()
+    if not hrp or not hrp.Parent then
+        hrp = getHRP()
+    end
+
+    updateChestEntries()
+    updateEnemyEntries()
+end)
