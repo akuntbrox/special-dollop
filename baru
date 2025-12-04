@@ -370,43 +370,16 @@ local function registerRuby(ruby)
 end
 
 local function findExpBookDesc(expBook)
-    if not expBook then
-        return nil
-    end
-
-    local directDesc = expBook:FindFirstChild("Desc", true)
-    if directDesc and directDesc:IsA("TextLabel") then
-        return directDesc
-    end
-
     local right = expBook:FindFirstChild("Right")
-    local surfaceGui
-    if right then
-        surfaceGui = right:FindFirstChildWhichIsA("SurfaceGui", true)
-            or right:FindFirstChildOfClass("SurfaceGui")
-            or right:FindFirstChild("SurfaceGui")
-    end
+    if not right then return nil end
 
-    if not surfaceGui then
-        surfaceGui = expBook:FindFirstChildWhichIsA("SurfaceGui", true)
-    end
+    local surfaceGui = right:FindFirstChildOfClass("SurfaceGui") or right:FindFirstChild("SurfaceGui")
     if not surfaceGui then return nil end
 
-    local expFrame = surfaceGui:FindFirstChild("EXP") or surfaceGui:FindFirstChild("Exp")
-    if expFrame then
-        local desc = expFrame:FindFirstChild("Desc") or expFrame:FindFirstChild("Description")
-        if desc and desc:IsA("TextLabel") then
-            return desc
-        end
-    end
+    local expFrame = surfaceGui:FindFirstChild("EXP")
+    if not expFrame then return nil end
 
-    for _, descendant in ipairs(surfaceGui:GetDescendants()) do
-        if descendant.Name == "Desc" and descendant:IsA("TextLabel") then
-            return descendant
-        end
-    end
-
-    return nil
+    return expFrame:FindFirstChild("Desc")
 end
 
 local function readDescTextColor(desc)
@@ -666,7 +639,13 @@ local function handleTowerDescendant(desc)
     end
 
     if (desc:IsA("Model") or desc:IsA("BasePart")) and lowerName:find("exp", 1, true) and lowerName:find("book", 1, true) then
-        registerEXPBook(desc)
+        local expModel = desc
+        if not expModel:IsA("Model") then
+            expModel = desc:FindFirstAncestorWhichIsA("Model") or desc
+        end
+        if expModel then
+            registerEXPBook(expModel)
+        end
         return
     end
 
