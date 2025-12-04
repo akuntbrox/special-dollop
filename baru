@@ -673,26 +673,6 @@ local function scanTower(tower)
     end
 end
 
-for _, tower in ipairs(towerFolder:GetChildren()) do
-    scanTower(tower)
-end
-
-towerFolder.ChildAdded:Connect(scanTower)
-
-local lastTowerScan = 0
-local TOWER_RESCAN_INTERVAL = 0.5
-RunService.Heartbeat:Connect(function()
-    local now = os.clock()
-    if now - lastTowerScan < TOWER_RESCAN_INTERVAL then
-        return
-    end
-    lastTowerScan = now
-
-    for _, tower in ipairs(towerFolder:GetChildren()) do
-        scanTower(tower)
-    end
-end)
-
 registerEXPBook = function(expBook)
     if chestMap[expBook] then return end
     if not (expBook:IsA("BasePart") or expBook:IsA("Model")) then return end
@@ -745,6 +725,26 @@ registerEXPBook = function(expBook)
         destroyChestESP(expBook)
     end)
 end
+
+for _, tower in ipairs(towerFolder:GetChildren()) do
+    scanTower(tower)
+end
+
+towerFolder.ChildAdded:Connect(scanTower)
+
+local lastTowerScan = 0
+local TOWER_RESCAN_INTERVAL = 0.5
+RunService.Heartbeat:Connect(function()
+    local now = os.clock()
+    if now - lastTowerScan < TOWER_RESCAN_INTERVAL then
+        return
+    end
+    lastTowerScan = now
+
+    for _, tower in ipairs(towerFolder:GetChildren()) do
+        scanTower(tower)
+    end
+end)
 
 local function isMercenary(character)
     local teamValue = character:GetAttribute("Team")
