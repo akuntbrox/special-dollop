@@ -5,7 +5,7 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/akuntbrox/special-dol
 ```
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/akuntbrox/special-dollop/refs/heads/main/finderv2"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/akuntbrox/special-dollop/refs/heads/main/baru"))()
 ```
 
 ```lua
