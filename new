@@ -53,7 +53,7 @@ local MIN_MOVE_AFTER_PORTAL = 20
 
 local RUN_ANIMATION_ID = 507767714 -- walk/run anim
 
-local STUCK_RADIUS = 200
+local STUCK_RADIUS = 400
 local IMSTUCK_COOLDOWN = 5
 
 --------------------------------------------------------
