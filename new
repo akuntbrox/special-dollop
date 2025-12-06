@@ -55,6 +55,9 @@ local RUN_ANIMATION_ID = 507767714 -- walk/run anim
 
 local STUCK_RADIUS = 400
 local IMSTUCK_COOLDOWN = 5
+local EXIT_PORTAL_HOLD_DURATION = 2
+local EXIT_PORTAL_REFRESH_INTERVAL = 1
+local TOWER_FOLDER_NAME = "Tower"
 
 --------------------------------------------------------
 -- INTERNAL STATE
@@ -74,6 +77,10 @@ local autoImStuckEnabled = false
 local lastStuckTime = 0
 
 local imStuckEvent = ReplicatedStorage:WaitForChild("Events", 10):WaitForChild("ImStuck", 10)
+local towerFolder = nil
+local towerChildAddedConn = nil
+local towerDestroyConn = nil
+local lastExitPortalCheck = 0
 
 --------------------------------------------------------
 -- ANIMATION (Humanoid.Running hooked)
@@ -278,6 +285,122 @@ if not IS_LOBBY then
     Workspace.DescendantAdded:Connect(function(desc)
         if desc:IsA("ProximityPrompt") then
             registerPrompt(desc)
+        end
+    end)
+end
+
+--------------------------------------------------------
+-- EXIT PORTAL HOLD DURATION (non-lobby)
+--------------------------------------------------------
+
+local function disconnectTowerConnections()
+    if towerChildAddedConn then
+        towerChildAddedConn:Disconnect()
+        towerChildAddedConn = nil
+    end
+
+    if towerDestroyConn then
+        towerDestroyConn:Disconnect()
+        towerDestroyConn = nil
+    end
+end
+
+local function setExitPortalHoldDuration(towerModel)
+    if not towerModel then
+        return
+    end
+
+    local exitPortal = towerModel:FindFirstChild("ExitPortal")
+    if not exitPortal then
+        return
+    end
+
+    local prompt = exitPortal:FindFirstChildOfClass("ProximityPrompt")
+    if not prompt then
+        return
+    end
+
+    if prompt:GetAttribute("HoldDuration") ~= EXIT_PORTAL_HOLD_DURATION then
+        prompt:SetAttribute("HoldDuration", EXIT_PORTAL_HOLD_DURATION)
+    end
+
+    local ok, holdDuration = pcall(function()
+        return prompt.HoldDuration
+    end)
+    if ok and typeof(holdDuration) == "number" and holdDuration ~= EXIT_PORTAL_HOLD_DURATION then
+        prompt.HoldDuration = EXIT_PORTAL_HOLD_DURATION
+    end
+end
+
+local function refreshExitPortalPrompts()
+    if not towerFolder then
+        return
+    end
+
+    for _, tower in ipairs(towerFolder:GetChildren()) do
+        if tonumber(tower.Name) then
+            setExitPortalHoldDuration(tower)
+        end
+    end
+end
+
+local function setupTowerFolder(folder)
+    if towerFolder == folder then
+        return
+    end
+
+    disconnectTowerConnections()
+
+    towerFolder = folder
+
+    if not towerFolder then
+        return
+    end
+
+    towerDestroyConn = towerFolder.Destroying:Connect(function()
+        disconnectTowerConnections()
+        towerFolder = nil
+    end)
+
+    towerChildAddedConn = towerFolder.ChildAdded:Connect(function(child)
+        if tonumber(child.Name) then
+            setExitPortalHoldDuration(child)
+        end
+    end)
+
+    refreshExitPortalPrompts()
+end
+
+local function tryInitializeTowerFolder()
+    if towerFolder and towerFolder.Parent then
+        return
+    end
+
+    local folder = Workspace:FindFirstChild(TOWER_FOLDER_NAME)
+    if folder then
+        setupTowerFolder(folder)
+    end
+end
+
+if not IS_LOBBY then
+    tryInitializeTowerFolder()
+
+    Workspace.ChildAdded:Connect(function(child)
+        if child.Name == TOWER_FOLDER_NAME then
+            setupTowerFolder(child)
+        end
+    end)
+
+    RunService.Heartbeat:Connect(function()
+        if not towerFolder then
+            tryInitializeTowerFolder()
+            return
+        end
+
+        local now = os.clock()
+        if now - lastExitPortalCheck >= EXIT_PORTAL_REFRESH_INTERVAL then
+            lastExitPortalCheck = now
+            refreshExitPortalPrompts()
         end
     end)
 end
