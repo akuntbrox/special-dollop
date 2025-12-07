@@ -17,16 +17,16 @@ local function setExitPortalHoldDuration(towerNumber)
     local prompt = exitPortal:FindFirstChildOfClass("ProximityPrompt")
     if not prompt then return end
 
-    if prompt:GetAttribute("HoldDuration") ~= 2 then
-        prompt:SetAttribute("HoldDuration", 2)
+    if prompt:GetAttribute("HoldDuration") ~= 1 then
+        prompt:SetAttribute("HoldDuration", 1)
     end
 
     local ok, holdDuration = pcall(function()
         return prompt.HoldDuration
     end)
 
-    if ok and typeof(holdDuration) == "number" and holdDuration ~= 2 then
-        prompt.HoldDuration = 2
+    if ok and typeof(holdDuration) == "number" and holdDuration ~= 1 then
+        prompt.HoldDuration = 1
     end
 end
 
