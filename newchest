@@ -281,23 +281,37 @@ local function warpToCache(alias, portalPart)
     return true
 end
 
-local function resyncWarping()
+local flagWarp = false
+local warpToggleControl
+local warpFlagId = "Flux_WarpAuto"
+
+local function resyncWarping(shouldWarp)
+    if shouldWarp == nil then
+        shouldWarp = flagWarp
+    end
+
     local warped = false
     for _, alias in ipairs(matrixOrder) do
         local portal = refreshVaultEntry(alias)
-        if portal and not warped then
+        if shouldWarp and portal and not warped then
             warped = warpToCache(alias, portal)
         end
     end
 end
 
-resyncWarping()
-
-local flagWarp = false
+resyncWarping(false)
 
 local function mutateWarpFlag(state)
+    if flagWarp == state then
+        return
+    end
+
     flagWarp = state
     print("[FluxChest] warp flag", state and "HOT" or "IDLE")
+
+    if flagWarp then
+        resyncWarping(true)
+    end
 end
 
 local function spinUpRayfield()
@@ -316,19 +330,41 @@ local function spinUpRayfield()
         LoadingSubtitle = "Flux Tools",
         DisableRayfieldPrompts = true,
         ConfigurationSaving = {
-            Enabled = false,
+            Enabled = true,
+            FolderName = "FluxChestSuite",
+            FileName = "FluxWarpSettings",
         },
     })
 
     local pane = frame:CreateTab("Warp", 4483362458)
 
-    pane:CreateToggle({
+    warpToggleControl = pane:CreateToggle({
         Name = "Auto Warp",
         CurrentValue = flagWarp,
+        Flag = warpFlagId,
         Callback = function(value)
             mutateWarpFlag(value)
         end,
     })
+
+    if RayfieldLib.LoadConfiguration then
+        RayfieldLib:LoadConfiguration()
+
+        task.defer(function()
+            local flags = RayfieldLib.Flags
+            if not flags then
+                return
+            end
+
+            local stored = flags[warpFlagId]
+            if stored and typeof(stored.CurrentValue) == "boolean" then
+                if warpToggleControl and warpToggleControl.Set then
+                    warpToggleControl:Set(stored.CurrentValue)
+                end
+                mutateWarpFlag(stored.CurrentValue)
+            end
+        end)
+    end
 end
 
 spinUpRayfield()
