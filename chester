@@ -252,6 +252,13 @@ end
 
 task.spawn(function()
     buildUi()
+
+    player.ChildAdded:Connect(function(child)
+        if child:IsA("PlayerGui") then
+            task.defer(buildUi)
+        end
+    end)
+
     player.CharacterAdded:Connect(function()
         task.defer(buildUi)
     end)
@@ -353,8 +360,25 @@ local function setAutoTeleportEnabled(state)
     print("Auto chest teleport", state and "ON" or "OFF")
 end
 
+local function getPlayerGui()
+    local existing = player:FindFirstChildOfClass("PlayerGui")
+    if existing then
+        return existing
+    end
+
+    local ok, result = pcall(function()
+        return player:WaitForChild("PlayerGui")
+    end)
+
+    if ok then
+        return result
+    end
+
+    return nil
+end
+
 local function buildUi()
-    local playerGui = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui", 5)
+    local playerGui = getPlayerGui()
     if not playerGui then
         return
     end
@@ -367,6 +391,7 @@ local function buildUi()
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "ChestTeleportUI"
     screenGui.ResetOnSpawn = false
+    screenGui.DisplayOrder = 50
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     screenGui.IgnoreGuiInset = true
     screenGui.Parent = playerGui
