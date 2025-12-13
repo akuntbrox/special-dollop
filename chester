@@ -1,5 +1,7 @@
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+local CHEST_ORDER = {"Chest1", "Chest2", "Chest3", "Chest4", "Chest5", "Chest6", "Chest7"}
 local CHEST_MAP = {
     Chest1 = "6",
     Chest2 = "1",
@@ -10,14 +12,91 @@ local CHEST_MAP = {
     Chest7 = "7",
 }
 
+local chestReferences = {}
+getgenv().ChestReferences = chestReferences
+
+local SERVER_CREATE_ARGS = {"PvP"}
+local tableUnpack = table.unpack or unpack
+local trackedPrompts = {}
+
 local WATCHED_SPAWNERS = {}
 for _, spawnerName in pairs(CHEST_MAP) do
     WATCHED_SPAWNERS[spawnerName] = true
 end
 
-local CHARS_Z_OFFSET = 5 -- hover slightly above the chest's pivot
+local CHARS_Z_OFFSET = 0 -- hover slightly above the chest's pivot
+local PER_CHEST_DELAY = 1
+local LOOP_DELAY = 2
+local PROMPT_SEARCH_RADIUS = 12
+local PROMPT_HOLD_DURATION = 0.1
+local NEARBY_PROMPT_RADIUS = 12
+
+local UserInputService = game:GetService("UserInputService")
 
 local player = Players.LocalPlayer
+
+local serverCreationRequested = false
+
+local function requestNewServer(reason)
+    if serverCreationRequested then
+        return
+    end
+    serverCreationRequested = true
+
+    local info = string.format("[ChestTP] %s | PlaceId: %d | JobId: %s", reason, game.PlaceId, game.JobId)
+    warn(info)
+
+    task.spawn(function()
+        local eventsFolder = ReplicatedStorage:FindFirstChild("Events")
+            or ReplicatedStorage:WaitForChild("Events", 5)
+        local serverCreate = eventsFolder and eventsFolder:FindFirstChild("ServerCreate")
+
+        if not serverCreate then
+            warn("[ChestTP] ServerCreate event not found")
+            return
+        end
+
+        local args = SERVER_CREATE_ARGS
+        local ok, err = pcall(function()
+            if typeof(serverCreate.FireServer) == "function" then
+                serverCreate:FireServer(tableUnpack(args))
+            elseif typeof(serverCreate.InvokeServer) == "function" then
+                serverCreate:InvokeServer(tableUnpack(args))
+            else
+                warn("[ChestTP] ServerCreate object is not a RemoteEvent/Function")
+            end
+        end)
+
+        if not ok then
+            warn("[ChestTP] ServerCreate failed:", err)
+        end
+    end)
+end
+
+for _, otherPlayer in ipairs(Players:GetPlayers()) do
+    if otherPlayer ~= player then
+        requestNewServer("Other player already in server")
+        break
+    end
+end
+
+Players.PlayerAdded:Connect(function(joiningPlayer)
+    if joiningPlayer ~= player then
+        requestNewServer("New player joined instance")
+    end
+end)
+
+for _, descendant in ipairs(workspace:GetDescendants()) do
+    if descendant:IsA("ProximityPrompt") then
+        registerPrompt(descendant)
+    end
+end
+
+workspace.DescendantAdded:Connect(function(descendant)
+    if descendant:IsA("ProximityPrompt") then
+        registerPrompt(descendant)
+    end
+end)
 
 local function getCharacter()
     return player.Character or player.CharacterAdded:Wait()
@@ -33,47 +112,252 @@ local function getHumanoidRootPart()
     return character:WaitForChild("HumanoidRootPart")
 end
 
-local function teleportToChest(chestPart)
+local function resolveChestNode(chestName)
+    if not chestName then
+        return nil
+    end
+
+    return workspace:FindFirstChild(chestName)
+end
+
+local function findWorkspaceChest(chestName)
+    local chestNode = resolveChestNode(chestName)
+    if not chestNode then
+        return nil
+    end
+
+    if chestNode:IsA("BasePart") then
+        return chestNode
+    end
+
+    if chestNode:IsA("Model") then
+        return chestNode.PrimaryPart or chestNode:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    return chestNode:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function updateChestReference(chestName)
+    local part = findWorkspaceChest(chestName)
+    chestReferences[chestName] = part
+    return part
+end
+
+local function findPromptOnPart(part)
+    if not part then
+        return nil
+    end
+
+    if part:IsA("Model") then
+        return part:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end
+
+    return part:FindFirstChildOfClass("ProximityPrompt")
+        or part:FindFirstChildWhichIsA("ProximityPrompt", true)
+end
+
+local function findPromptNearPosition(position, radius, chestNode)
+    radius = radius or PROMPT_SEARCH_RADIUS
+    if not chestNode then
+        return nil
+    end
+
+    local function tryParts(parts)
+        for _, part in ipairs(parts) do
+            if part:IsDescendantOf(chestNode) then
+                local prompt = findPromptOnPart(part)
+                if prompt then
+                    return prompt
+                end
+            end
+        end
+        return nil
+    end
+
+    if workspace.GetPartBoundsInRadius then
+        local ok, nearbyParts = pcall(workspace.GetPartBoundsInRadius, workspace, position, radius)
+        if ok and nearbyParts then
+            local prompt = tryParts(nearbyParts)
+            if prompt then
+                return prompt
+            end
+        end
+    end
+
+    for _, descendant in ipairs(chestNode:GetDescendants()) do
+        if descendant:IsA("ProximityPrompt") then
+            return descendant
+        end
+    end
+
+    return nil
+end
+
+local function getPromptForChest(chestName, chestNode, chestPart)
+    local prompt = findPromptOnPart(chestPart)
+    if prompt then
+        return prompt
+    end
+
+    if chestNode and chestNode ~= chestPart then
+        prompt = findPromptOnPart(chestNode)
+        if prompt then
+            return prompt
+        end
+    end
+
+    return findPromptNearPosition(chestPart.Position, PROMPT_SEARCH_RADIUS, chestNode)
+end
+
+local function registerPrompt(prompt)
+    if prompt and prompt:IsA("ProximityPrompt") then
+        table.insert(trackedPrompts, prompt)
+    end
+end
+
+local function checkForNearbyPrompt(rootPart)
+    if not rootPart then
+        return false, nil, math.huge
+    end
+
+    local closestDist = math.huge
+    local closestPrompt = nil
+
+    for i = #trackedPrompts, 1, -1 do
+        local prompt = trackedPrompts[i]
+
+        if not prompt or not prompt.Parent then
+            table.remove(trackedPrompts, i)
+        elseif prompt.Enabled then
+            local promptPart = prompt.Parent
+            if not promptPart:IsA("BasePart") then
+                promptPart = prompt.Parent:FindFirstChildWhichIsA("BasePart")
+            end
+
+            if promptPart then
+                local dist = (promptPart.Position - rootPart.Position).Magnitude
+                if dist < closestDist then
+                    closestDist = dist
+                    closestPrompt = prompt
+                end
+            end
+        end
+    end
+
+    if closestPrompt and closestDist <= NEARBY_PROMPT_RADIUS then
+        return true, closestPrompt, closestDist
+    end
+
+    return false, nil, closestDist
+end
+
+local function teleportToChest(chestName, chestPart)
+    if not chestPart then
+        return false
+    end
+
+    local chestNode = resolveChestNode(chestName)
+    local prompt = getPromptForChest(chestName, chestNode, chestPart)
     local humanoid = getHumanoid()
     local hrp = getHumanoidRootPart()
 
     -- hop before teleport to mask the instant movement
     humanoid.Jump = true
     task.wait(0.1)
-
+    
     hrp.CFrame = chestPart.CFrame + Vector3.new(0, CHARS_Z_OFFSET, 0)
-
-    local prompt = chestPart:FindFirstChildOfClass("ProximityPrompt")
-        or chestPart:FindFirstChildWhichIsA("ProximityPrompt", true)
-    if prompt then
-        pcall(function()
-            fireproximityprompt(prompt)
-        end)
+    
+    task.wait(0.1)
+    prompt = prompt or findPromptNearPosition(hrp.Position, PROMPT_SEARCH_RADIUS, chestNode)
+    if not prompt then
+        local found, nearbyPrompt = checkForNearbyPrompt(hrp)
+        if found then
+            prompt = nearbyPrompt
+        end
     end
+    if prompt and prompt.Parent then
+        pcall(function()
+            prompt.HoldDuration = PROMPT_HOLD_DURATION
+        end)
+
+        local fired = pcall(function()
+            fireproximityprompt(prompt, PROMPT_HOLD_DURATION, true)
+        end)
+
+        if not fired then
+            local desiredHold = PROMPT_HOLD_DURATION
+            local okHold, actualHold = pcall(function()
+                return prompt.HoldDuration
+            end)
+            if okHold and typeof(actualHold) == "number" and actualHold > 0 then
+                desiredHold = actualHold
+            end
+
+            task.spawn(function()
+                prompt:InputHoldBegin()
+                task.wait(desiredHold + 0.1)
+                prompt:InputHoldEnd()
+            end)
+        end
+    end
+
+    humanoid.Jump = false
+
+    return true
 end
 
 local function syncChestsAndTeleport()
-    local spawners = workspace:FindFirstChild("ChestSpawners")
-    if not spawners then
-        return
-    end
-
     local teleported = false
-    for chestName, spawnerName in pairs(CHEST_MAP) do
-        local target = spawners:FindFirstChild(spawnerName)
-        if target and target:IsA("BasePart") then
-            workspace[chestName] = target
-            if not teleported then
-                teleportToChest(target)
-                teleported = true
-            end
+    for _, chestName in ipairs(CHEST_ORDER) do
+        local target = updateChestReference(chestName)
+        if target and not teleported then
+            teleported = teleportToChest(chestName, target)
         end
     end
 end
 
 syncChestsAndTeleport()
 
+local autoTeleportEnabled = false
+
+local function setAutoTeleportEnabled(state)
+    autoTeleportEnabled = state
+    print("Auto chest teleport", state and "ON" or "OFF")
+end
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then
+        return
+    end
+
+    if input.KeyCode == Enum.KeyCode.L then
+        setAutoTeleportEnabled(not autoTeleportEnabled)
+    end
+end)
+
+task.spawn(function()
+    while true do
+        if autoTeleportEnabled then
+            for _, chestName in ipairs(CHEST_ORDER) do
+                local chest = chestReferences[chestName]
+                if chest then
+                    if teleportToChest(chestName, chest) then
+                        task.wait(PER_CHEST_DELAY)
+                    end
+                end
+            end
+            task.wait(LOOP_DELAY)
+        end
+        task.wait(0.2)
+    end
+end)
+
 workspace.ChildAdded:Connect(function(child)
+    if CHEST_MAP[child.Name] then
+        updateChestReference(child.Name)
+        syncChestsAndTeleport()
+    end
+
     if child.Name == "ChestSpawners" then
         syncChestsAndTeleport()
 
@@ -82,6 +366,12 @@ workspace.ChildAdded:Connect(function(child)
                 syncChestsAndTeleport()
             end
         end)
+    end
+end)
+
+workspace.ChildRemoved:Connect(function(child)
+    if CHEST_MAP[child.Name] then
+        chestReferences[child.Name] = nil
     end
 end)
 
