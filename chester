@@ -1,0 +1,77 @@
+local Players = game:GetService("Players")
+
+local CHEST_MAP = {
+    Chest5 = "3",
+    Chest1 = "6",
+    Chest4 = "2",
+    Chest2 = "1",
+}
+
+local WATCHED_SPAWNERS = {}
+for _, spawnerName in pairs(CHEST_MAP) do
+    WATCHED_SPAWNERS[spawnerName] = true
+end
+
+local CHARS_Z_OFFSET = 5 -- hover slightly above the chest's pivot
+
+local player = Players.LocalPlayer
+
+local function getHumanoidRootPart()
+    local character = player.Character or player.CharacterAdded:Wait()
+    return character:WaitForChild("HumanoidRootPart")
+end
+
+local function teleportToChest(chestPart)
+    local hrp = getHumanoidRootPart()
+    hrp.CFrame = chestPart.CFrame + Vector3.new(0, CHARS_Z_OFFSET, 0)
+
+    local prompt = chestPart:FindFirstChildOfClass("ProximityPrompt")
+        or chestPart:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt then
+        pcall(function()
+            fireproximityprompt(prompt)
+        end)
+    end
+end
+
+local function syncChestsAndTeleport()
+    local spawners = workspace:FindFirstChild("ChestSpawners")
+    if not spawners then
+        return
+    end
+
+    local teleported = false
+    for chestName, spawnerName in pairs(CHEST_MAP) do
+        local target = spawners:FindFirstChild(spawnerName)
+        if target and target:IsA("BasePart") then
+            workspace[chestName] = target
+            if not teleported then
+                teleportToChest(target)
+                teleported = true
+            end
+        end
+    end
+end
+
+syncChestsAndTeleport()
+
+workspace.ChildAdded:Connect(function(child)
+    if child.Name == "ChestSpawners" then
+        syncChestsAndTeleport()
+
+        child.ChildAdded:Connect(function(grandChild)
+            if WATCHED_SPAWNERS[grandChild.Name] then
+                syncChestsAndTeleport()
+            end
+        end)
+    end
+end)
+
+local spawners = workspace:FindFirstChild("ChestSpawners")
+if spawners then
+    spawners.ChildAdded:Connect(function(child)
+        if WATCHED_SPAWNERS[child.Name] then
+            syncChestsAndTeleport()
+        end
+    end)
+end
