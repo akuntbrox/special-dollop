@@ -1,10 +1,13 @@
 local Players = game:GetService("Players")
 
 local CHEST_MAP = {
-    Chest5 = "3",
     Chest1 = "6",
-    Chest4 = "2",
     Chest2 = "1",
+    Chest3 = "4",
+    Chest4 = "2",
+    Chest5 = "3",
+    Chest6 = "5",
+    Chest7 = "7",
 }
 
 local WATCHED_SPAWNERS = {}
@@ -16,13 +19,28 @@ local CHARS_Z_OFFSET = 5 -- hover slightly above the chest's pivot
 
 local player = Players.LocalPlayer
 
+local function getCharacter()
+    return player.Character or player.CharacterAdded:Wait()
+end
+
+local function getHumanoid()
+    local character = getCharacter()
+    return character:WaitForChild("Humanoid")
+end
+
 local function getHumanoidRootPart()
-    local character = player.Character or player.CharacterAdded:Wait()
+    local character = getCharacter()
     return character:WaitForChild("HumanoidRootPart")
 end
 
 local function teleportToChest(chestPart)
+    local humanoid = getHumanoid()
     local hrp = getHumanoidRootPart()
+
+    -- hop before teleport to mask the instant movement
+    humanoid.Jump = true
+    task.wait(0.1)
+
     hrp.CFrame = chestPart.CFrame + Vector3.new(0, CHARS_Z_OFFSET, 0)
 
     local prompt = chestPart:FindFirstChildOfClass("ProximityPrompt")
