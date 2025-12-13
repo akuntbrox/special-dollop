@@ -1,6 +1,5 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local GuiService = game:GetService("GuiService")
 
 local CHEST_ORDER = {"Chest1", "Chest2", "Chest3", "Chest4", "Chest5", "Chest6", "Chest7"}
 local CHEST_MAP = {
@@ -252,13 +251,6 @@ end
 
 task.spawn(function()
     buildUi()
-
-    player.ChildAdded:Connect(function(child)
-        if child:IsA("PlayerGui") then
-            task.defer(buildUi)
-        end
-    end)
-
     player.CharacterAdded:Connect(function()
         task.defer(buildUi)
     end)
@@ -360,25 +352,8 @@ local function setAutoTeleportEnabled(state)
     print("Auto chest teleport", state and "ON" or "OFF")
 end
 
-local function getPlayerGui()
-    local existing = player:FindFirstChildOfClass("PlayerGui")
-    if existing then
-        return existing
-    end
-
-    local ok, result = pcall(function()
-        return player:WaitForChild("PlayerGui")
-    end)
-
-    if ok then
-        return result
-    end
-
-    return nil
-end
-
 local function buildUi()
-    local playerGui = getPlayerGui()
+    local playerGui = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui", 5)
     if not playerGui then
         return
     end
@@ -391,16 +366,13 @@ local function buildUi()
     local screenGui = Instance.new("ScreenGui")
     screenGui.Name = "ChestTeleportUI"
     screenGui.ResetOnSpawn = false
-    screenGui.DisplayOrder = 50
     screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    screenGui.IgnoreGuiInset = true
     screenGui.Parent = playerGui
 
     local frame = Instance.new("Frame")
     frame.Name = "Container"
     frame.Size = UDim2.new(0, 180, 0, 70)
-    local inset = GuiService:GetGuiInset()
-    frame.Position = UDim2.new(0, 10, 0, inset.Y + 50)
+    frame.Position = UDim2.new(0, 10, 0, 90)
     frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
     frame.BackgroundTransparency = 0.2
     frame.BorderSizePixel = 0
@@ -435,12 +407,9 @@ local function buildUi()
     btnCorner.CornerRadius = UDim.new(0, 5)
     btnCorner.Parent = toggleButton
 
-    local function onToggle()
+    toggleButton.MouseButton1Click:Connect(function()
         setAutoTeleportEnabled(not autoTeleportEnabled)
-    end
-
-    toggleButton.MouseButton1Click:Connect(onToggle)
-    toggleButton.Activated:Connect(onToggle)
+    end)
 
     uiElements.statusLabel = statusLabel
     uiElements.toggleButton = toggleButton
@@ -458,7 +427,7 @@ task.spawn(function()
                     end
                 end
             end
-            task.wait(LOOP_DELAY)
+       task.wait(LOOP_DELAY)
         end
         task.wait(0.2)
     end
