@@ -31,8 +31,6 @@ local PROMPT_SEARCH_RADIUS = 12
 local PROMPT_HOLD_DURATION = 0.1
 local NEARBY_PROMPT_RADIUS = 12
 
-local UserInputService = game:GetService("UserInputService")
-
 local player = Players.LocalPlayer
 
 local serverCreationRequested = false
@@ -83,18 +81,6 @@ end
 Players.PlayerAdded:Connect(function(joiningPlayer)
     if joiningPlayer ~= player then
         requestNewServer("New player joined instance")
-    end
-end)
-
-for _, descendant in ipairs(workspace:GetDescendants()) do
-    if descendant:IsA("ProximityPrompt") then
-        registerPrompt(descendant)
-    end
-end
-
-workspace.DescendantAdded:Connect(function(descendant)
-    if descendant:IsA("ProximityPrompt") then
-        registerPrompt(descendant)
     end
 end)
 
@@ -215,6 +201,18 @@ local function registerPrompt(prompt)
     end
 end
 
+for _, descendant in ipairs(workspace:GetDescendants()) do
+    if descendant:IsA("ProximityPrompt") then
+        registerPrompt(descendant)
+    end
+end
+
+workspace.DescendantAdded:Connect(function(descendant)
+    if descendant:IsA("ProximityPrompt") then
+        registerPrompt(descendant)
+    end
+end)
+
 local function checkForNearbyPrompt(rootPart)
     if not rootPart then
         return false, nil, math.huge
@@ -250,6 +248,13 @@ local function checkForNearbyPrompt(rootPart)
 
     return false, nil, closestDist
 end
+
+task.spawn(function()
+    buildUi()
+    player.CharacterAdded:Connect(function()
+        task.defer(buildUi)
+    end)
+end)
 
 local function teleportToChest(chestName, chestPart)
     if not chestPart then
@@ -320,20 +325,96 @@ syncChestsAndTeleport()
 
 local autoTeleportEnabled = false
 
+local uiElements = {
+    statusLabel = nil,
+    toggleButton = nil,
+}
+
+local function updateUiState()
+    local statusLabel = uiElements.statusLabel
+    local toggleButton = uiElements.toggleButton
+    local statusText = autoTeleportEnabled and "ON" or "OFF"
+
+    if statusLabel then
+        statusLabel.Text = "Chest Auto TP: " .. statusText
+    end
+
+    if toggleButton then
+        toggleButton.Text = autoTeleportEnabled and "Disable" or "Enable"
+        toggleButton.BackgroundColor3 = autoTeleportEnabled and Color3.fromRGB(0, 170, 0)
+            or Color3.fromRGB(170, 0, 0)
+    end
+end
+
 local function setAutoTeleportEnabled(state)
     autoTeleportEnabled = state
+    updateUiState()
     print("Auto chest teleport", state and "ON" or "OFF")
 end
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then
+local function buildUi()
+    local playerGui = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui", 5)
+    if not playerGui then
         return
     end
 
-    if input.KeyCode == Enum.KeyCode.L then
-        setAutoTeleportEnabled(not autoTeleportEnabled)
+    local existing = playerGui:FindFirstChild("ChestTeleportUI")
+    if existing then
+        existing:Destroy()
     end
-end)
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "ChestTeleportUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    screenGui.Parent = playerGui
+
+    local frame = Instance.new("Frame")
+    frame.Name = "Container"
+    frame.Size = UDim2.new(0, 180, 0, 70)
+    frame.Position = UDim2.new(0, 10, 0, 90)
+    frame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    frame.BackgroundTransparency = 0.2
+    frame.BorderSizePixel = 0
+    frame.Parent = screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 6)
+    corner.Parent = frame
+
+    local statusLabel = Instance.new("TextLabel")
+    statusLabel.Name = "StatusLabel"
+    statusLabel.Size = UDim2.new(1, -20, 0, 25)
+    statusLabel.Position = UDim2.new(0, 10, 0, 8)
+    statusLabel.BackgroundTransparency = 1
+    statusLabel.Font = Enum.Font.GothamBold
+    statusLabel.TextSize = 16
+    statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+    statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+    statusLabel.Parent = frame
+
+    local toggleButton = Instance.new("TextButton")
+    toggleButton.Name = "ToggleButton"
+    toggleButton.Size = UDim2.new(1, -20, 0, 28)
+    toggleButton.Position = UDim2.new(0, 10, 0, 38)
+    toggleButton.Font = Enum.Font.GothamSemibold
+    toggleButton.TextSize = 14
+    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleButton.AutoButtonColor = false
+    toggleButton.Parent = frame
+
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 5)
+    btnCorner.Parent = toggleButton
+
+    toggleButton.MouseButton1Click:Connect(function()
+        setAutoTeleportEnabled(not autoTeleportEnabled)
+    end)
+
+    uiElements.statusLabel = statusLabel
+    uiElements.toggleButton = toggleButton
+    updateUiState()
+end
 
 task.spawn(function()
     while true do
