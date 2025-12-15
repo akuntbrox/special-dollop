@@ -1,0 +1,535 @@
+local srvPX = game:GetService("Players")
+local srvVU = game:GetService("VirtualUser")
+
+local matrixOrder = {
+    "Chest1",
+    "Chest2",
+    "Chest3",
+    "Chest4",
+    "Chest5",
+    "Chest6",
+    "Chest7",
+    "Chest8",
+    "Chest9",
+    "Chest10",
+    "Chest11",
+    "Chest12",
+    "Chest13",
+}
+
+local spoolLookup = {
+    Chest1 = "6",
+    Chest2 = "1",
+    Chest3 = "4",
+    Chest4 = "2",
+    Chest5 = "3",
+    Chest6 = "5",
+    Chest7 = "7",
+    Chest8 = "8",
+    Chest9 = "9",
+    Chest10 = "10",
+    Chest11 = "11",
+    Chest12 = "12",
+    Chest13 = "13",
+}
+
+local vaultCache = {}
+getgenv().VaultCache = vaultCache
+
+local pingPrompts = {}
+
+local sentrySet = {}
+for _, id in pairs(spoolLookup) do
+    sentrySet[id] = true
+end
+
+local driftDelay = 1
+local sweepDelay = 2
+local promptRadius = 12
+local promptHold = 0.1
+local haloRadius = 12
+local teleportLift = 6
+local returnDelay = 0.05
+local promptRetryCount = 3
+local promptRetryDelay = 0.2
+local promptWarmDelay = 0.1
+local flagAntiIdle = true
+local antiIdleConnection
+local antiToggleControl
+local antiFlagId = "Flux_AntiIdle"
+
+local localPilot = srvPX.LocalPlayer
+
+local function locateSpawnCFrame()
+    local node = workspace:FindFirstChild("LobbySpawn")
+    if not node then
+        return nil
+    end
+
+    if node:IsA("BasePart") then
+        return node.CFrame
+    end
+
+    if node:IsA("Model") then
+        local base = node.PrimaryPart or node:FindFirstChildWhichIsA("BasePart", true)
+        if base then
+            return base.CFrame
+        end
+    end
+
+    local part = node:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.CFrame or nil
+end
+
+local function grabAvatar()
+    return localPilot.Character or localPilot.CharacterAdded:Wait()
+end
+
+local function grabHumanoid()
+    return grabAvatar():WaitForChild("Humanoid")
+end
+
+local function grabRoot()
+    return grabAvatar():WaitForChild("HumanoidRootPart")
+end
+
+local function probeChestNode(alias)
+    if not alias then
+        return nil
+    end
+    return workspace:FindFirstChild(alias)
+end
+
+local function locateChestPart(alias)
+    local node = probeChestNode(alias)
+    if not node then
+        return nil
+    end
+
+    if node:IsA("BasePart") then
+        return node
+    end
+
+    if node:IsA("Model") then
+        return node.PrimaryPart or node:FindFirstChildWhichIsA("BasePart", true)
+    end
+
+    return node:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function refreshVaultEntry(alias)
+    local part = locateChestPart(alias)
+    vaultCache[alias] = part
+    return part
+end
+
+local function probePromptOn(item)
+    if not item then
+        return nil
+    end
+
+    if item:IsA("Model") then
+        return item:FindFirstChildWhichIsA("ProximityPrompt", true)
+    end
+
+    return item:FindFirstChildOfClass("ProximityPrompt")
+        or item:FindFirstChildWhichIsA("ProximityPrompt", true)
+end
+
+local function probePromptNear(origin, radius, chestNode)
+    radius = radius or promptRadius
+    if not chestNode then
+        return nil
+    end
+
+    if workspace.GetPartBoundsInRadius then
+        local ok, parts = pcall(workspace.GetPartBoundsInRadius, workspace, origin, radius)
+        if ok and parts then
+            for _, part in ipairs(parts) do
+                if part:IsDescendantOf(chestNode) then
+                    local prompt = probePromptOn(part)
+                    if prompt then
+                        return prompt
+                    end
+                end
+            end
+        end
+    end
+
+    for _, descendant in ipairs(chestNode:GetDescendants()) do
+        if descendant:IsA("ProximityPrompt") then
+            return descendant
+        end
+    end
+
+    return nil
+end
+
+local function resolvePrompt(alias, chestNode, chestPart)
+    local prompt = probePromptOn(chestPart)
+    if prompt then
+        return prompt
+    end
+
+    if chestNode and chestNode ~= chestPart then
+        prompt = probePromptOn(chestNode)
+        if prompt then
+            return prompt
+        end
+    end
+
+    return probePromptNear(chestPart.Position, promptRadius, chestNode)
+end
+
+local function stashPrompt(prompt)
+    if prompt and prompt:IsA("ProximityPrompt") then
+        table.insert(pingPrompts, prompt)
+    end
+end
+
+for _, desc in ipairs(workspace:GetDescendants()) do
+    if desc:IsA("ProximityPrompt") then
+        stashPrompt(desc)
+    end
+end
+
+workspace.DescendantAdded:Connect(function(desc)
+    if desc:IsA("ProximityPrompt") then
+        stashPrompt(desc)
+    end
+end)
+
+local function scanAmbientPrompt(rootPart)
+    if not rootPart then
+        return false, nil
+    end
+
+    local bestPrompt
+    local bestDist = math.huge
+
+    for idx = #pingPrompts, 1, -1 do
+        local prompt = pingPrompts[idx]
+        if not prompt or not prompt.Parent then
+            table.remove(pingPrompts, idx)
+        elseif prompt.Enabled then
+            local holder = prompt.Parent
+            if not holder:IsA("BasePart") then
+                holder = holder:FindFirstChildWhichIsA("BasePart")
+            end
+            if holder then
+                local dist = (holder.Position - rootPart.Position).Magnitude
+                if dist < bestDist then
+                    bestDist = dist
+                    bestPrompt = prompt
+                end
+            end
+        end
+    end
+
+    if bestPrompt and bestDist <= haloRadius then
+        return true, bestPrompt
+    end
+
+    return false, nil
+end
+
+local function firePrompt(prompt)
+    if not prompt or not prompt.Parent then
+        return false
+    end
+
+    pcall(function()
+        prompt.HoldDuration = promptHold
+    end)
+
+    local fired = pcall(function()
+        fireproximityprompt(prompt, promptHold, true)
+    end)
+
+    if fired then
+        return true
+    end
+
+    local holdFor = promptHold
+    local ok, actual = pcall(function()
+        return prompt.HoldDuration
+    end)
+    if ok and typeof(actual) == "number" and actual > 0 then
+        holdFor = actual
+    end
+
+    task.spawn(function()
+        prompt:InputHoldBegin()
+        task.wait(holdFor + 0.1)
+        prompt:InputHoldEnd()
+    end)
+
+    return true
+end
+
+local function harvestPrompt(alias, chestNode, chestPart, root)
+    local prompt = resolvePrompt(alias, chestNode, chestPart)
+    if prompt then
+        return prompt
+    end
+
+    if root then
+        prompt = probePromptNear(root.Position, promptRadius, chestNode)
+        if prompt then
+            return prompt
+        end
+
+        local _, ambient = scanAmbientPrompt(root)
+        if ambient then
+            return ambient
+        end
+    end
+
+    return nil
+end
+
+local function warpToCache(alias, portalPart)
+    if not portalPart then
+        return false
+    end
+
+    local chestNode = probeChestNode(alias)
+    local hum = grabHumanoid()
+    local root = grabRoot()
+    local originalCFrame = root.CFrame
+
+    hum.Jump = true
+    task.wait(0.05)
+
+    local liftTarget = portalPart.Position + Vector3.new(0, teleportLift, 0)
+    root.CFrame = CFrame.new(liftTarget, liftTarget + portalPart.CFrame.LookVector)
+    task.wait(promptWarmDelay)
+
+    for attempt = 1, promptRetryCount do
+        local prompt = harvestPrompt(alias, chestNode, portalPart, root)
+        if not prompt then
+            break
+        end
+
+        firePrompt(prompt)
+
+        task.wait(promptRetryDelay)
+
+        if not prompt.Parent or not prompt.Enabled then
+            break
+        end
+    end
+
+    task.wait(returnDelay)
+    local spawnCFrame = locateSpawnCFrame()
+    if spawnCFrame then
+        root.CFrame = spawnCFrame
+    else
+        root.CFrame = originalCFrame
+    end
+    hum.Jump = false
+
+    return true
+end
+
+local function primeAntiIdleConnection()
+    if antiIdleConnection then
+        return
+    end
+
+    antiIdleConnection = localPilot.Idled:Connect(function()
+        if not flagAntiIdle then
+            return
+        end
+
+        local ok, camera = pcall(function()
+            return workspace.CurrentCamera
+        end)
+
+        srvVU:CaptureController()
+        if ok and camera then
+            srvVU:ClickButton2(Vector2.new(), camera.CFrame)
+        else
+            srvVU:Button2Down(Vector2.new(), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
+            task.wait(0.05)
+            srvVU:Button2Up(Vector2.new(), workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
+        end
+    end)
+end
+
+local flagWarp = false
+local warpToggleControl
+local warpFlagId = "Flux_WarpAuto"
+
+local function resyncWarping(shouldWarp)
+    if shouldWarp == nil then
+        shouldWarp = flagWarp
+    end
+
+    local warped = false
+    for _, alias in ipairs(matrixOrder) do
+        local portal = refreshVaultEntry(alias)
+        if shouldWarp and portal and not warped then
+            warped = warpToCache(alias, portal)
+        end
+    end
+end
+
+local function mutateAntiIdleFlag(state)
+    if flagAntiIdle == state then
+        return
+    end
+
+    flagAntiIdle = state
+    print("[FluxChest] anti-idle flag", state and "HOT" or "IDLE")
+
+    if not flagAntiIdle then
+        if antiIdleConnection then
+            antiIdleConnection:Disconnect()
+            antiIdleConnection = nil
+        end
+        return
+    end
+
+    primeAntiIdleConnection()
+end
+
+if flagAntiIdle then
+    primeAntiIdleConnection()
+end
+
+resyncWarping(false)
+
+local function mutateWarpFlag(state)
+    if flagWarp == state then
+        return
+    end
+
+    flagWarp = state
+    print("[FluxChest] warp flag", state and "HOT" or "IDLE")
+
+    if flagWarp then
+        resyncWarping(true)
+    end
+end
+
+local function spinUpRayfield()
+    local ok, RayfieldLib = pcall(function()
+        return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+    end)
+
+    if not ok then
+        warn("[FluxChest] no Rayfield", RayfieldLib)
+        return
+    end
+
+    local frame = RayfieldLib:CreateWindow({
+        Name = "Flux Chest Suite",
+        LoadingTitle = "Priming",
+        LoadingSubtitle = "Flux Tools",
+        DisableRayfieldPrompts = true,
+        ConfigurationSaving = {
+            Enabled = true,
+            FolderName = "FluxChestSuite",
+            FileName = "FluxWarpSettings",
+        },
+    })
+
+    local pane = frame:CreateTab("Warp", 4483362458)
+
+    warpToggleControl = pane:CreateToggle({
+        Name = "Auto Warp",
+        CurrentValue = flagWarp,
+        Flag = warpFlagId,
+        Callback = function(value)
+            mutateWarpFlag(value)
+        end,
+    })
+
+    antiToggleControl = pane:CreateToggle({
+        Name = "Anti AFK",
+        CurrentValue = flagAntiIdle,
+        Flag = antiFlagId,
+        Callback = function(value)
+            mutateAntiIdleFlag(value)
+        end,
+    })
+
+    if RayfieldLib.LoadConfiguration then
+        RayfieldLib:LoadConfiguration()
+
+        task.defer(function()
+            local flags = RayfieldLib.Flags
+            if not flags then
+                return
+            end
+
+            local storedWarp = flags[warpFlagId]
+            if storedWarp and typeof(storedWarp.CurrentValue) == "boolean" then
+                if warpToggleControl and warpToggleControl.Set then
+                    warpToggleControl:Set(storedWarp.CurrentValue)
+                end
+                mutateWarpFlag(storedWarp.CurrentValue)
+            end
+
+            local storedAnti = flags[antiFlagId]
+            if storedAnti and typeof(storedAnti.CurrentValue) == "boolean" then
+                if antiToggleControl and antiToggleControl.Set then
+                    antiToggleControl:Set(storedAnti.CurrentValue)
+                end
+                mutateAntiIdleFlag(storedAnti.CurrentValue)
+            end
+        end)
+    end
+end
+
+spinUpRayfield()
+
+task.spawn(function()
+    while true do
+        if flagWarp then
+            for _, alias in ipairs(matrixOrder) do
+                local portal = vaultCache[alias]
+                if portal then
+                    if warpToCache(alias, portal) then
+                        task.wait(driftDelay)
+                    end
+                end
+            end
+            task.wait(sweepDelay)
+        end
+        task.wait(0.2)
+    end
+end)
+
+workspace.ChildAdded:Connect(function(child)
+    if spoolLookup[child.Name] then
+        refreshVaultEntry(child.Name)
+        resyncWarping()
+    end
+
+    if child.Name == "ChestSpawners" then
+        resyncWarping()
+
+        child.ChildAdded:Connect(function(grandChild)
+            if sentrySet[grandChild.Name] then
+                resyncWarping()
+            end
+        end)
+    end
+end)
+
+workspace.ChildRemoved:Connect(function(child)
+    if spoolLookup[child.Name] then
+        vaultCache[child.Name] = nil
+    end
+end)
+
+local spawnerFolder = workspace:FindFirstChild("ChestSpawners")
+if spawnerFolder then
+    spawnerFolder.ChildAdded:Connect(function(child)
+        if sentrySet[child.Name] then
+            resyncWarping()
+        end
+    end)
+end
