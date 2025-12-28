@@ -1,419 +1,278 @@
-local srvPX = game:GetService("Players")
-local srvRS = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local matrixOrder = {"Chest1", "Chest2", "Chest3", "Chest4", "Chest5", "Chest6", "Chest7"}
-local spoolLookup = {
-    Chest1 = "6",
-    Chest2 = "1",
-    Chest3 = "4",
-    Chest4 = "2",
-    Chest5 = "3",
-    Chest6 = "5",
-    Chest7 = "7",
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local resultInviteEvent = ReplicatedStorage:WaitForChild("Events"):WaitForChild("ResultInviteArenaGroup")
+
+local ACCEPT_ARGS = {true, false}
+local DECLINE_ARGS = {false, true}
+
+local TARGET_DISPLAY_NAMES = {
+    "JajangShotgun",
 }
 
-local vaultCache = {}
-getgenv().VaultCache = vaultCache
+local ACCEPT_COOLDOWN = 1.25
+local DECLINE_COOLDOWN = 0.85
+local PATH_TIMEOUT = 4
+local DECLINE_NON_TARGETS = true
+local LABEL_PATH = {"ScreenInfo", "Invites", "DungeonInvite", "Bar", "Info", "Label"}
+local INVITE_FRAME_PATH = {"ScreenInfo", "Invites", "DungeonInvite"}
+local LOG_PREFIX = "[DL-AutoInvite]"
 
-local forgeArgs = {"PvP"}
-local burstUnpack = table.unpack or unpack
-local pingPrompts = {}
-
-local sentrySet = {}
-for _, id in pairs(spoolLookup) do
-    sentrySet[id] = true
-end
-
-local offsetBand = 0
-local driftDelay = 1
-local sweepDelay = 2
-local promptRadius = 12
-local promptHold = 0.1
-local haloRadius = 12
-
-local localPilot = srvPX.LocalPlayer
-local shardLock = false
-
-local function jitterServer(reason)
-    if shardLock then
-        return
+local function formatMessage(message, ...)
+    local ok, formatted = pcall(string.format, message, ...)
+    if ok then
+        return string.format("%s %s", LOG_PREFIX, formatted)
     end
-    shardLock = true
-
-    warn(string.format("[FluxChest] %s | PID:%d | JOB:%s", reason, game.PlaceId, game.JobId))
-
-    task.spawn(function()
-        local eventsFolder = srvRS:FindFirstChild("Events")
-            or srvRS:WaitForChild("Events", 5)
-        local serverCreate = eventsFolder and eventsFolder:FindFirstChild("ServerCreate")
-        if not serverCreate then
-            warn("[FluxChest] missing ServerCreate hook")
-            return
-        end
-
-        local ok, err = pcall(function()
-            if typeof(serverCreate.FireServer) == "function" then
-                serverCreate:FireServer(burstUnpack(forgeArgs))
-            elseif typeof(serverCreate.InvokeServer) == "function" then
-                serverCreate:InvokeServer(burstUnpack(forgeArgs))
-            end
-        end)
-
-        if not ok then
-            warn("[FluxChest] shard request failed", err)
-        end
-    end)
+    return string.format("%s %s", LOG_PREFIX, tostring(message))
 end
 
-for _, plr in ipairs(srvPX:GetPlayers()) do
-    if plr ~= localPilot then
-        jitterServer("occupant detected")
-        break
+local function normalizeDisplayName(raw)
+    if typeof(raw) ~= "string" then
+        return ""
+    end
+
+    local withoutBrackets = raw:gsub("%[[^%]]*%]", "")
+    local collapsed = withoutBrackets:gsub("%s+", "")
+    if collapsed == "" then
+        return ""
+    end
+
+    return string.lower(collapsed)
+end
+
+local normalizedTargets = {}
+for _, name in ipairs(TARGET_DISPLAY_NAMES) do
+    local normalized = normalizeDisplayName(name)
+    if normalized ~= "" then
+        normalizedTargets[normalized] = true
     end
 end
 
-srvPX.PlayerAdded:Connect(function(plr)
-    if plr ~= localPilot then
-        jitterServer("join ping")
-    end
-end)
-
-local function grabAvatar()
-    return localPilot.Character or localPilot.CharacterAdded:Wait()
+if next(normalizedTargets) == nil then
+    warn(formatMessage("No target display names configured; script will remain idle."))
 end
 
-local function grabHumanoid()
-    return grabAvatar():WaitForChild("Humanoid")
-end
-
-local function grabRoot()
-    return grabAvatar():WaitForChild("HumanoidRootPart")
-end
-
-local function probeChestNode(alias)
-    if not alias then
-        return nil
-    end
-    return workspace:FindFirstChild(alias)
-end
-
-local function locateChestPart(alias)
-    local node = probeChestNode(alias)
-    if not node then
+local function safeWait(parent, childName, timeout)
+    if not parent then
         return nil
     end
 
-    if node:IsA("BasePart") then
-        return node
+    local child = parent:FindFirstChild(childName)
+    if child then
+        return child
     end
 
-    if node:IsA("Model") then
-        return node.PrimaryPart or node:FindFirstChildWhichIsA("BasePart", true)
-    end
-
-    return node:FindFirstChildWhichIsA("BasePart", true)
-end
-
-local function refreshVaultEntry(alias)
-    local part = locateChestPart(alias)
-    vaultCache[alias] = part
-    return part
-end
-
-local function probePromptOn(item)
-    if not item then
-        return nil
-    end
-
-    if item:IsA("Model") then
-        return item:FindFirstChildWhichIsA("ProximityPrompt", true)
-    end
-
-    return item:FindFirstChildOfClass("ProximityPrompt")
-        or item:FindFirstChildWhichIsA("ProximityPrompt", true)
-end
-
-local function probePromptNear(origin, radius, chestNode)
-    radius = radius or promptRadius
-    if not chestNode then
-        return nil
-    end
-
-    if workspace.GetPartBoundsInRadius then
-        local ok, parts = pcall(workspace.GetPartBoundsInRadius, workspace, origin, radius)
-        if ok and parts then
-            for _, part in ipairs(parts) do
-                if part:IsDescendantOf(chestNode) then
-                    local prompt = probePromptOn(part)
-                    if prompt then
-                        return prompt
-                    end
-                end
-            end
-        end
-    end
-
-    for _, descendant in ipairs(chestNode:GetDescendants()) do
-        if descendant:IsA("ProximityPrompt") then
-            return descendant
-        end
+    local ok, result = pcall(parent.WaitForChild, parent, childName, timeout or PATH_TIMEOUT)
+    if ok then
+        return result
     end
 
     return nil
 end
 
-local function resolvePrompt(alias, chestNode, chestPart)
-    local prompt = probePromptOn(chestPart)
-    if prompt then
-        return prompt
-    end
-
-    if chestNode and chestNode ~= chestPart then
-        prompt = probePromptOn(chestNode)
-        if prompt then
-            return prompt
+local function getInstanceAtPath(root, path, timeout)
+    local current = root
+    for _, node in ipairs(path) do
+        current = safeWait(current, node, timeout)
+        if not current then
+            return nil
         end
     end
-
-    return probePromptNear(chestPart.Position, promptRadius, chestNode)
+    return current
 end
 
-local function stashPrompt(prompt)
-    if prompt and prompt:IsA("ProximityPrompt") then
-        table.insert(pingPrompts, prompt)
+local function getInviteFrame(timeout)
+    return getInstanceAtPath(playerGui, INVITE_FRAME_PATH, timeout)
+end
+
+local function getInviteLabel(timeout)
+    return getInstanceAtPath(playerGui, LABEL_PATH, timeout)
+end
+
+local function disconnect(conn)
+    if conn then
+        conn:Disconnect()
     end
 end
 
-for _, desc in ipairs(workspace:GetDescendants()) do
-    if desc:IsA("ProximityPrompt") then
-        stashPrompt(desc)
-    end
-end
+local activeLabel
+local inviteFrame
+local labelTextConn
+local labelAncestryConn
+local inviteVisibleConn
+local inviteAncestryConn
+local labelSearching = false
+local lastAcceptTimestamp = 0
+local lastDeclineTimestamp = 0
 
-workspace.DescendantAdded:Connect(function(desc)
-    if desc:IsA("ProximityPrompt") then
-        stashPrompt(desc)
-    end
-end)
-
-local function scanAmbientPrompt(rootPart)
-    if not rootPart then
-        return false, nil
-    end
-
-    local bestPrompt
-    local bestDist = math.huge
-
-    for idx = #pingPrompts, 1, -1 do
-        local prompt = pingPrompts[idx]
-        if not prompt or not prompt.Parent then
-            table.remove(pingPrompts, idx)
-        elseif prompt.Enabled then
-            local holder = prompt.Parent
-            if not holder:IsA("BasePart") then
-                holder = holder:FindFirstChildWhichIsA("BasePart")
-            end
-            if holder then
-                local dist = (holder.Position - rootPart.Position).Magnitude
-                if dist < bestDist then
-                    bestDist = dist
-                    bestPrompt = prompt
-                end
-            end
+local function fireInviteResult(accept)
+    local ok, err = pcall(function()
+        if accept then
+            resultInviteEvent:FireServer(table.unpack(ACCEPT_ARGS))
+        else
+            resultInviteEvent:FireServer(table.unpack(DECLINE_ARGS))
         end
-    end
-
-    if bestPrompt and bestDist <= haloRadius then
-        return true, bestPrompt
-    end
-
-    return false, nil
-end
-
-local function warpToCache(alias, portalPart)
-    if not portalPart then
-        return false
-    end
-
-    local chestNode = probeChestNode(alias)
-    local prompt = resolvePrompt(alias, chestNode, portalPart)
-    local hum = grabHumanoid()
-    local root = grabRoot()
-
-    hum.Jump = true
-    task.wait(0.1)
-    root.CFrame = portalPart.CFrame + Vector3.new(0, offsetBand, 0)
-    task.wait(0.1)
-
-    prompt = prompt or probePromptNear(root.Position, promptRadius, chestNode)
-    if not prompt then
-        local found, ambient = scanAmbientPrompt(root)
-        prompt = ambient or prompt
-    end
-
-    if prompt and prompt.Parent then
-        pcall(function()
-            prompt.HoldDuration = promptHold
-        end)
-
-        local fired = pcall(function()
-            fireproximityprompt(prompt, promptHold, true)
-        end)
-
-        if not fired then
-            local holdFor = promptHold
-            local ok, actual = pcall(function()
-                return prompt.HoldDuration
-            end)
-            if ok and typeof(actual) == "number" and actual > 0 then
-                holdFor = actual
-            end
-
-            task.spawn(function()
-                prompt:InputHoldBegin()
-                task.wait(holdFor + 0.1)
-                prompt:InputHoldEnd()
-            end)
-        end
-    end
-
-    hum.Jump = false
-    return true
-end
-
-local flagWarp = false
-local warpToggleControl
-local warpFlagId = "Flux_WarpAuto"
-
-local function resyncWarping(shouldWarp)
-    if shouldWarp == nil then
-        shouldWarp = flagWarp
-    end
-
-    local warped = false
-    for _, alias in ipairs(matrixOrder) do
-        local portal = refreshVaultEntry(alias)
-        if shouldWarp and portal and not warped then
-            warped = warpToCache(alias, portal)
-        end
-    end
-end
-
-resyncWarping(false)
-
-local function mutateWarpFlag(state)
-    if flagWarp == state then
-        return
-    end
-
-    flagWarp = state
-    print("[FluxChest] warp flag", state and "HOT" or "IDLE")
-
-    if flagWarp then
-        resyncWarping(true)
-    end
-end
-
-local function spinUpRayfield()
-    local ok, RayfieldLib = pcall(function()
-        return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
     end)
 
     if not ok then
-        warn("[FluxChest] no Rayfield", RayfieldLib)
+        warn(formatMessage("Failed to %s invite: %s", accept and "accept" or "decline", tostring(err)))
+        return false
+    end
+
+    return true
+end
+
+local function respondToInvite(accept, rawLabel)
+    local now = os.clock()
+
+    if accept then
+        if now - lastAcceptTimestamp < ACCEPT_COOLDOWN then
+            return false
+        end
+        if fireInviteResult(true) then
+            lastAcceptTimestamp = now
+            print(formatMessage("Accepted invite from %s", rawLabel ~= "" and rawLabel or "target player"))
+            return true
+        end
+    else
+        if now - lastDeclineTimestamp < DECLINE_COOLDOWN then
+            return false
+        end
+        if fireInviteResult(false) then
+            lastDeclineTimestamp = now
+            if rawLabel and rawLabel ~= "" then
+                print(formatMessage("Declined invite from %s", rawLabel))
+            else
+                print(formatMessage("Declined invite."))
+            end
+            return true
+        end
+    end
+
+    return false
+end
+
+local function evaluateLabelText(rawText)
+    if typeof(rawText) ~= "string" or rawText == "" then
         return
     end
 
-    local frame = RayfieldLib:CreateWindow({
-        Name = "Flux Chest Suite",
-        LoadingTitle = "Priming",
-        LoadingSubtitle = "Flux Tools",
-        DisableRayfieldPrompts = true,
-        ConfigurationSaving = {
-            Enabled = true,
-            FolderName = "FluxChestSuite",
-            FileName = "FluxWarpSettings",
-        },
-    })
+    local normalized = normalizeDisplayName(rawText)
+    if normalized == "" then
+        return
+    end
 
-    local pane = frame:CreateTab("Warp", 4483362458)
-
-    warpToggleControl = pane:CreateToggle({
-        Name = "Auto Warp",
-        CurrentValue = flagWarp,
-        Flag = warpFlagId,
-        Callback = function(value)
-            mutateWarpFlag(value)
-        end,
-    })
-
-    if RayfieldLib.LoadConfiguration then
-        RayfieldLib:LoadConfiguration()
-
-        task.defer(function()
-            local flags = RayfieldLib.Flags
-            if not flags then
-                return
-            end
-
-            local stored = flags[warpFlagId]
-            if stored and typeof(stored.CurrentValue) == "boolean" then
-                if warpToggleControl and warpToggleControl.Set then
-                    warpToggleControl:Set(stored.CurrentValue)
-                end
-                mutateWarpFlag(stored.CurrentValue)
-            end
-        end)
+    if normalizedTargets[normalized] then
+        respondToInvite(true, rawText)
+    elseif DECLINE_NON_TARGETS then
+        respondToInvite(false, rawText)
     end
 end
 
-spinUpRayfield()
+local function disconnectLabelConnections()
+    disconnect(labelTextConn)
+    disconnect(labelAncestryConn)
+    labelTextConn = nil
+    labelAncestryConn = nil
+end
 
-task.spawn(function()
-    while true do
-        if flagWarp then
-            for _, alias in ipairs(matrixOrder) do
-                local portal = vaultCache[alias]
-                if portal then
-                    if warpToCache(alias, portal) then
-                        task.wait(driftDelay)
-                    end
-                end
-            end
-            task.wait(sweepDelay)
+local function disconnectInviteConnections()
+    disconnect(inviteVisibleConn)
+    disconnect(inviteAncestryConn)
+    inviteVisibleConn = nil
+    inviteAncestryConn = nil
+    inviteFrame = nil
+end
+
+local acquireLabel
+
+local function connectInviteFrame(frame)
+    if inviteFrame == frame and inviteVisibleConn then
+        return
+    end
+
+    disconnectInviteConnections()
+    inviteFrame = frame
+
+    if not frame then
+        return
+    end
+
+    inviteVisibleConn = frame:GetPropertyChangedSignal("Visible"):Connect(function()
+        if frame.Visible and activeLabel then
+            evaluateLabelText(activeLabel.Text)
         end
-        task.wait(0.2)
-    end
-end)
+    end)
 
-workspace.ChildAdded:Connect(function(child)
-    if spoolLookup[child.Name] then
-        refreshVaultEntry(child.Name)
-        resyncWarping()
-    end
-
-    if child.Name == "ChestSpawners" then
-        resyncWarping()
-
-        child.ChildAdded:Connect(function(grandChild)
-            if sentrySet[grandChild.Name] then
-                resyncWarping()
-            end
-        end)
-    end
-end)
-
-workspace.ChildRemoved:Connect(function(child)
-    if spoolLookup[child.Name] then
-        vaultCache[child.Name] = nil
-    end
-end)
-
-local spawnerFolder = workspace:FindFirstChild("ChestSpawners")
-if spawnerFolder then
-    spawnerFolder.ChildAdded:Connect(function(child)
-        if sentrySet[child.Name] then
-            resyncWarping()
+    inviteAncestryConn = frame.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            disconnectInviteConnections()
+            activeLabel = nil
+            labelSearching = false
+            task.defer(acquireLabel)
         end
     end)
 end
+
+local function attachToLabel(label)
+    if activeLabel == label then
+        return
+    end
+
+    disconnectLabelConnections()
+    activeLabel = label
+
+    local frame = getInviteFrame(1) or label:FindFirstAncestor("DungeonInvite")
+    connectInviteFrame(frame)
+    evaluateLabelText(label.Text)
+
+    labelTextConn = label:GetPropertyChangedSignal("Text"):Connect(function()
+        evaluateLabelText(label.Text)
+    end)
+
+    labelAncestryConn = label.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            disconnectLabelConnections()
+            disconnectInviteConnections()
+            activeLabel = nil
+            labelSearching = false
+            task.defer(acquireLabel)
+        end
+    end)
+end
+
+acquireLabel = function()
+    if labelSearching or activeLabel then
+        return
+    end
+
+    labelSearching = true
+
+    task.spawn(function()
+        while not activeLabel do
+            local label = getInviteLabel(PATH_TIMEOUT)
+            if label then
+                attachToLabel(label)
+                break
+            end
+            task.wait(1.5)
+        end
+
+        labelSearching = false
+    end)
+end
+
+acquireLabel()
+
+playerGui.ChildAdded:Connect(function(child)
+    if child.Name == "ScreenInfo" or child.Name == "Invites" then
+        task.defer(acquireLabel)
+    end
+end)
+
+player.CharacterAdded:Connect(function()
+    task.wait(2)
+    acquireLabel()
+end)
