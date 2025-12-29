@@ -1,5 +1,7 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
@@ -19,6 +21,9 @@ local DECLINE_NON_TARGETS = true
 local LABEL_PATH = {"ScreenInfo", "Invites", "DungeonInvite", "Bar", "Info", "Label"}
 local INVITE_FRAME_PATH = {"ScreenInfo", "Invites", "DungeonInvite"}
 local LOG_PREFIX = "[DL-AutoInvite]"
+local SERVER_HOP_DELAY = 1.5
+local SERVER_LIST_PAGE_LIMIT = 5
+local ENABLE_SERVER_HOP = false
 
 local function formatMessage(message, ...)
     local ok, formatted = pcall(string.format, message, ...)
@@ -50,8 +55,102 @@ for _, name in ipairs(TARGET_DISPLAY_NAMES) do
     end
 end
 
-if next(normalizedTargets) == nil then
+local hasTargetsConfigured = next(normalizedTargets) ~= nil
+local autoServerHopEnabled = ENABLE_SERVER_HOP and hasTargetsConfigured
+
+if not hasTargetsConfigured then
     warn(formatMessage("No target display names configured; script will remain idle."))
+elseif autoServerHopEnabled then
+    print(formatMessage("Auto server hop enabled via flag."))
+else
+    print(formatMessage("Auto server hop disabled via flag."))
+end
+
+local function requestServerPage(cursor)
+    local url = string.format(
+        "https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=100",
+        game.PlaceId
+    )
+
+    if cursor then
+        url = string.format("%s&cursor=%s", url, HttpService:UrlEncode(cursor))
+    end
+
+    local ok, response = pcall(HttpService.GetAsync, HttpService, url)
+    if not ok then
+        warn(formatMessage("Failed to fetch server list: %s", tostring(response)))
+        return nil, nil
+    end
+
+    local decodeOk, decoded = pcall(HttpService.JSONDecode, HttpService, response)
+    if not decodeOk or typeof(decoded) ~= "table" then
+        warn(formatMessage("Failed to decode server list response: %s", tostring(decoded)))
+        return nil, nil
+    end
+
+    return decoded.data, decoded.nextPageCursor
+end
+
+local function selectServerId()
+    local cursor
+
+    for _ = 1, SERVER_LIST_PAGE_LIMIT do
+        local data, nextCursor = requestServerPage(cursor)
+        if not data then
+            break
+        end
+
+        for _, server in ipairs(data) do
+            if server and server.id and server.id ~= game.JobId then
+                local playing = tonumber(server.playing)
+                local maxPlayers = tonumber(server.maxPlayers)
+
+                if playing and maxPlayers and playing < maxPlayers then
+                    return server.id
+                end
+            end
+        end
+
+        if not nextCursor then
+            break
+        end
+
+        cursor = nextCursor
+    end
+
+    return nil
+end
+
+local serverHopInProgress = false
+
+local function scheduleServerHop(rawLabel)
+    if not autoServerHopEnabled or serverHopInProgress then
+        return
+    end
+
+    serverHopInProgress = true
+
+    task.spawn(function()
+        local descriptor = rawLabel and rawLabel ~= "" and rawLabel or "unknown"
+        print(formatMessage("Auto server hop triggered (non-target invite from %s).", descriptor))
+        task.wait(SERVER_HOP_DELAY)
+
+        local serverId = selectServerId()
+        if not serverId then
+            warn(formatMessage("Auto server hop failed: no suitable server found."))
+            serverHopInProgress = false
+            return
+        end
+
+        local ok, err = pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, serverId)
+        end)
+
+        if not ok then
+            warn(formatMessage("Teleport failed: %s", tostring(err)))
+            serverHopInProgress = false
+        end
+    end)
 end
 
 local function safeWait(parent, childName, timeout)
@@ -166,8 +265,11 @@ local function evaluateLabelText(rawText)
 
     if normalizedTargets[normalized] then
         respondToInvite(true, rawText)
-    elseif DECLINE_NON_TARGETS then
-        respondToInvite(false, rawText)
+    else
+        if DECLINE_NON_TARGETS then
+            respondToInvite(false, rawText)
+        end
+        scheduleServerHop(rawText)
     end
 end
 
