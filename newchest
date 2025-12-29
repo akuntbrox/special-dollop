@@ -23,7 +23,7 @@ local INVITE_FRAME_PATH = {"ScreenInfo", "Invites", "DungeonInvite"}
 local LOG_PREFIX = "[DL-AutoInvite]"
 local SERVER_HOP_DELAY = 1.5
 local SERVER_LIST_PAGE_LIMIT = 5
-local ENABLE_SERVER_HOP = false
+local ENABLE_SERVER_HOP = true
 
 local function formatMessage(message, ...)
     local ok, formatted = pcall(string.format, message, ...)
