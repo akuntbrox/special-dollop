@@ -11,6 +11,7 @@ local DECLINE_ARGS = {false, true}
 local TARGET_DISPLAY_NAMES = {
     "JajangShotgun",
     "Vyrtoxx",
+    "Kiting",
 }
 
 local ACCEPT_COOLDOWN = 1.25
