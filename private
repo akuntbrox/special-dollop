@@ -1,0 +1,280 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+local LOBBY_PLACE_ID = 80620565999570
+local TELEPORT_POSITION = Vector3.new(-224, 15, -798)
+local TELEPORT_HOTKEY = Enum.KeyCode.V
+-- local LOBBY_PLACE_ID = 88043900517876
+local TEAM_NAMES = {"Blue", "Red"}
+local SWAP_TEAM_ENABLED = false
+
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+local function getHRP()
+    local character = player.Character or player.CharacterAdded:Wait()
+    return character:WaitForChild("HumanoidRootPart")
+end
+
+if game.PlaceId ~= LOBBY_PLACE_ID then
+    local UserInputService = game:GetService("UserInputService")
+    local playerGui = player:WaitForChild("PlayerGui")
+
+    local function teleportToSavedPosition()
+        local ok, err = pcall(function()
+            local hrp = getHRP()
+            local humanoid = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
+            if humanoid then
+                humanoid.Jump = true
+                task.wait(0.05)
+            end
+            hrp.CFrame = CFrame.new(TELEPORT_POSITION)
+        end)
+
+        if not ok then
+            warn(string.format("[AutoPrivateLobby] Failed to teleport: %s", tostring(err)))
+        end
+    end
+
+    local function createTeleportGui()
+        local existing = playerGui:FindFirstChild("AutoLobbyTeleportGui")
+        if existing then
+            existing:Destroy()
+        end
+
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "AuGui"
+        gui.ResetOnSpawn = false
+        gui.Parent = playerGui
+
+        local button = Instance.new("TextButton")
+        button.Name = "TeleportButton"
+        button.Size = UDim2.new(0, 180, 0, 50)
+        button.Position = UDim2.new(0.5, -90, 0.85, 0)
+        button.AnchorPoint = Vector2.new(0.5, 0.5)
+        button.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+        button.TextColor3 = Color3.new(1, 1, 1)
+        button.TextSize = 20
+        button.Text = "Teleport"
+        button.Parent = gui
+
+        -- Provide a tap/click teleport option for devices without keyboards.
+        button.Activated:Connect(function()
+            teleportToSavedPosition()
+        end)
+    end
+
+    createTeleportGui()
+
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed or input.UserInputType ~= Enum.UserInputType.Keyboard then
+            return
+        end
+
+        if input.KeyCode == TELEPORT_HOTKEY then
+            teleportToSavedPosition()
+        end
+    end)
+
+    warn(string.format("[AutoPrivateLobby] PlaceId %s does not match lobby place. '%s' hotkey set for teleport only.", tostring(game.PlaceId), TELEPORT_HOTKEY.Name))
+    return
+end
+
+local eventsFolder = ReplicatedStorage:WaitForChild("Events")
+local createGroupEvent = eventsFolder:WaitForChild("CreateArenaGroup")
+local changeSettingEvent = eventsFolder:WaitForChild("ArenaGroupChangeSetting")
+local inviteEvent = eventsFolder:WaitForChild("SendInvitePlayerToArenaGroup")
+local swapTeamEvent = eventsFolder:WaitForChild("SwapArenaTeam")
+
+local SETTINGS_SEQUENCE = {"Private", "Map"}
+local TARGET_PLAYER_NAMES = {"Xmj688"} -- "Id player yang mau di invite"
+local busyMakingLobby = false
+local currentTeamName
+local playerGui = player:WaitForChild("PlayerGui")
+
+local function getArenaGroupContainer()
+    local playerGui = player:FindFirstChildOfClass("PlayerGui") or player:WaitForChild("PlayerGui", 5)
+    if not playerGui then
+        return nil
+    end
+
+    local interactionZones = playerGui:FindFirstChild("InteractionZones")
+    if not interactionZones then
+        return nil
+    end
+
+    local arenaGroup = interactionZones:FindFirstChild("ArenaGroup")
+    if not arenaGroup then
+        return nil
+    end
+
+    return arenaGroup:FindFirstChild("Group")
+end
+
+local function detectCurrentTeam()
+    local groupFolder = getArenaGroupContainer()
+    if not groupFolder then
+        return nil
+    end
+
+    for _, teamName in ipairs(TEAM_NAMES) do
+        local teamFrame = groupFolder:FindFirstChild(teamName)
+        if teamFrame then
+            local found = teamFrame:FindFirstChild(player.Name, true)
+            if found then
+                return teamName
+            end
+        end
+    end
+
+    return nil
+end
+
+local function getTeamMembers(teamName)
+    local groupFolder = getArenaGroupContainer()
+    if not groupFolder then
+        return nil
+    end
+
+    local teamFrame = groupFolder:FindFirstChild(teamName)
+    if not teamFrame then
+        return nil
+    end
+
+    local added = {}
+    local members = {}
+
+    for _, desc in ipairs(teamFrame:GetDescendants()) do
+        local teammate = Players:FindFirstChild(desc.Name)
+        if teammate and not added[teammate] then
+            table.insert(members, teammate)
+            added[teammate] = true
+        end
+    end
+
+    return members
+end
+
+local function swapPlayerToOppositeTeam(targetPlayer)
+    if not targetPlayer or targetPlayer == player then
+        return
+    end
+
+    local ok, err = pcall(function()
+        swapTeamEvent:FireServer(targetPlayer.UserId)
+    end)
+
+    if not ok then
+        warn(string.format("[AutoPrivateLobby] Failed to swap %s: %s", targetPlayer.Name, tostring(err)))
+    end
+end
+
+local function ensureSoloTeam()
+    if not currentTeamName or not SWAP_TEAM_ENABLED then
+        return
+    end
+
+    local teammates = getTeamMembers(currentTeamName)
+    if not teammates then
+        return
+    end
+
+    for _, teammate in ipairs(teammates) do
+        if teammate ~= player then
+            swapPlayerToOppositeTeam(teammate)
+            task.wait(0.1)
+        end
+    end
+end
+
+local function updateTeamIfNeeded()
+    local detectedTeam = detectCurrentTeam()
+    if detectedTeam and detectedTeam ~= currentTeamName then
+        currentTeamName = detectedTeam
+        print(string.format("[AutoPrivateLobby] Detected team: %s", currentTeamName))
+        ensureSoloTeam()
+    elseif detectedTeam and detectedTeam == currentTeamName then
+        ensureSoloTeam()
+    end
+end
+
+task.spawn(function()
+    while true do
+        updateTeamIfNeeded()
+        task.wait(1)
+    end
+end)
+
+playerGui.ChildAdded:Connect(function(child)
+    if child.Name == "InteractionZones" then
+        updateTeamIfNeeded()
+    end
+end)
+
+playerGui.DescendantAdded:Connect(function(descendant)
+    if descendant.Name == player.Name then
+        updateTeamIfNeeded()
+    end
+end)
+
+local function invitePlayers()
+    for _, targetName in ipairs(TARGET_PLAYER_NAMES) do
+        local targetPlayer = Players:FindFirstChild(targetName)
+        if not targetPlayer then
+            local ok, found = pcall(function()
+                return Players:WaitForChild(targetName, 5)
+            end)
+            if ok then
+                targetPlayer = found
+            end
+        end
+
+        if not targetPlayer then
+            warn(string.format("[AutoPrivateLobby] Could not find player '%s' to invite.", targetName))
+        else
+            local ok, err = pcall(function()
+                inviteEvent:InvokeServer(targetPlayer)
+            end)
+
+            if not ok then
+                warn(string.format("[AutoPrivateLobby] Failed to invite %s: %s", targetName, tostring(err)))
+            end
+            task.wait(0.5)
+        end
+    end
+end
+
+local function makeLobbyPrivate()
+    if busyMakingLobby then
+        return
+    end
+
+    busyMakingLobby = true
+
+    local ok, err = pcall(function()
+        createGroupEvent:FireServer()
+        task.wait(0.5)
+
+        for _, setting in ipairs(SETTINGS_SEQUENCE) do
+            changeSettingEvent:FireServer(setting)
+            task.wait(0.4)
+        end
+
+        invitePlayers()
+    end)
+
+    if not ok then
+        warn("[AutoPrivateLobby] Failed to apply settings:", err)
+    end
+
+    busyMakingLobby = false
+end
+
+makeLobbyPrivate()
+
+player.CharacterAdded:Connect(function()
+    task.wait(1)
+    makeLobbyPrivate()
+end)
