@@ -9,7 +9,8 @@ local ACCEPT_ARGS = {true, false}
 local DECLINE_ARGS = {false, true}
 
 local TARGET_DISPLAY_NAMES = {
-    "JajangShotgun",
+    "MimamAsli",
+    "cangcimen12355",
     "kwan1708",
     "Casanova",
     "DryDevil",
