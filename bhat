@@ -272,464 +272,88 @@ end
 bootstrapArenaModule()
 
 local function startAutoPrivateLobby()
-    local LOBBY_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
-    local TELEPORT_POSITION = Vector3.new(-224, 15, -798)
-    local MATCH_TELEPORT_POINTS = {
-        Vector3.new(-224, 15, -882);
-        Vector3.new(-222, 15, -971);
-    }
-    local MATCH_TELEPORT_DELAY = 1
-    local AUTO_START_AFTER_INVITES = true
     local USE_SAME_EQUIPMENT = false
-    local TEAM_NAMES = {"Blue", "Red"}
-    local SWAP_TEAM_ENABLED = false
-    local busyMakingLobby = false
-    local currentTeamName
 
-    local function getHRP()
-        local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-        return character:WaitForChild("HumanoidRootPart")
-    end
-
-    local function playTeleportEffect(hrp, position)
-        local humanoid = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
-        if humanoid then
-            humanoid.Jump = true
-            task.wait(0.05)
+    local function resolveTargetPlayer(targetName)
+        local player = Players:FindFirstChild(targetName)
+        if player then
+            return player
         end
-        hrp.CFrame = CFrame.new(position)
-    end
-
-    local function teleportSequence()
-        local ok, err = pcall(function()
-            local hrp = getHRP()
-            local points = #MATCH_TELEPORT_POINTS > 0 and MATCH_TELEPORT_POINTS or {TELEPORT_POSITION}
-            for index, teleportPosition in ipairs(points) do
-                playTeleportEffect(hrp, teleportPosition)
-                if index < #points then
-                    task.wait(MATCH_TELEPORT_DELAY)
-                end
-            end
+        local ok, result = pcall(function()
+            return Players:WaitForChild(targetName, 5)
         end)
-
-        if not ok then
-            warn(string.format("[AutoPrivateLobby] Failed to run teleport sequence: %s", tostring(err)))
+        if ok then
+            return result
         end
-    end
-
-    local function ensureLobbyJobConsistency()
-        local remotePlaceId, remoteJobId = fetchRemoteTeleportTarget()
-        local targetJobId = sanitizeJobId(remoteJobId)
-        local currentJobId = sanitizeJobId(game.JobId)
-
-        if targetJobId and currentJobId and targetJobId ~= currentJobId then
-            local teleported = teleportToJobId(targetJobId, "LobbyJobMismatch", remotePlaceId)
-            if not teleported then
-                warn("[AutoPrivateLobby] Lobby job mismatch detected but teleport could not be triggered.")
-            end
-            return false
-        end
-
-        return true
-    end
-
-local function runNonLobbyFlow()
-    task.spawn(function()
-        if not game:IsLoaded() then
-            game.Loaded:Wait()
-        end
-
-            local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-            if not character then
-                return
-            end
-
-            local okHumanoid, humanoid = pcall(function()
-                return character:WaitForChild("Humanoid", 5)
-            end)
-            local okHrp, hrp = pcall(function()
-                return character:WaitForChild("HumanoidRootPart", 5)
-            end)
-            if not okHumanoid or not humanoid or not okHrp or not hrp then
-                return
-            end
-
-            task.wait(4)
-
-            local function ensureEquipped()
-                local equipHandler = _G.AutoMedalForceWeaponEquip
-                if equipHandler then
-                    equipHandler()
-                    return
-                end
-                local okEquip, errEquip = pcall(function()
-                    local events = waitForChildCritical(ReplicatedStorage, "Events", 8, "ArenaEquipEvents")
-                    if not events then
-                        return
-                    end
-                    local fallbackWeaponsEvent = waitForChildCritical(events, "WeaponsEvent", 8, "ArenaWeaponsEventMissing")
-                    if not fallbackWeaponsEvent then
-                        return
-                    end
-                    fallbackWeaponsEvent:FireServer("Equip/UnEquip")
-                end)
-                if not okEquip then
-                    warn(string.format("[AutoPrivateLobby] Failed to trigger fallback equip: %s", tostring(errEquip)))
-                end
-            end
-
-            ensureEquipped()
-
-            local auraHandler = _G.AutoMedalForceAuraEnable
-            if auraHandler then
-                auraHandler()
-            end
-
-            teleportSequence()
-
-            local okReturn, errReturn = pcall(function()
-                local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
-                if not playerGui then
-                    return
-                end
-                local screenInfo = playerGui:FindFirstChild("ScreenInfo") or playerGui:WaitForChild("ScreenInfo", 5)
-                if not screenInfo then
-                    return
-                end
-                local arenaResultGui = screenInfo:FindFirstChild("ArenaResultTEST") or screenInfo:WaitForChild("ArenaResultTEST", 5)
-                if not arenaResultGui then
-                    return
-                end
-
-                local function waitForVisibility(targetState, timeout)
-                    local deadline = os.clock() + timeout
-                    while os.clock() < deadline do
-                        if arenaResultGui.Visible == targetState then
-                            return true
-                        end
-                        task.wait(0.25)
-                    end
-                    return false
-                end
-
-                if arenaResultGui.Visible then
-                    local cleared = waitForVisibility(false, 60)
-                    if not cleared then
-                        warn("[AutoPrivateLobby] Arena result UI never hid; skipping auto return.")
-                        return
-                    end
-                end
-
-                local shown = waitForVisibility(true, 180)
-                if not shown then
-                    warn("[AutoPrivateLobby] Arena result UI never appeared; skipping auto return.")
-                    return
-                end
-
-                task.wait(2)
-                local events = waitForChildCritical(ReplicatedStorage, "Events", 8, "ArenaReturnEvents")
-                local returnEvent = events and waitForChildCritical(events, "ArenaReturnToLobby", 8, "ArenaReturnMissing")
-                if returnEvent then
-                    returnEvent:FireServer()
-                    print("[AutoPrivateLobby] Arena result detected; returning to lobby.")
-                end
-            end)
-
-            if not okReturn then
-                warn(string.format("[AutoPrivateLobby] Failed to trigger ArenaReturnToLobby after arena sequence: %s", tostring(errReturn)))
-            end
-        end)
-
-        warn(string.format("[AutoPrivateLobby] Non-lobby place detected (%s). Combat prep flow triggered.", tostring(game.PlaceId)))
-    end
-    task.wait(24)
-    print("[AutoPrivateLobby] Lobby detected; starting automated private lobby sequence.")
-    if game.PlaceId == ARENA_PLACE_ID then
-        runNonLobbyFlow()
-        return
-    end
-
-    if game.PlaceId ~= LOBBY_PLACE_ID then
-        warn(string.format("[AutoPrivateLobby] Unexpected place (%s); redirecting to configured job.", tostring(game.PlaceId)))
-        teleportToJobId(nil, "NonArenaRedirect")
-        return
-    end
-    if not ensureLobbyJobConsistency() then
-        return
-    end
-
-    local eventsFolder = waitForChildCritical(ReplicatedStorage, "Events", 10, "LobbyEventsMissing")
-    if not eventsFolder then
-        return
-    end
-    local createGroupEvent = waitForChildCritical(eventsFolder, "CreateArenaGroup", 10, "LobbyCreateGroupMissing")
-    local changeSettingEvent = waitForChildCritical(eventsFolder, "ArenaGroupChangeSetting", 10, "LobbyChangeSettingMissing")
-    local inviteEvent = waitForChildCritical(eventsFolder, "SendInvitePlayerToArenaGroup", 10, "LobbyInviteMissing")
-    local swapTeamEvent = waitForChildCritical(eventsFolder, "SwapArenaTeam", 10, "LobbySwapMissing")
-    local startArenaEvent = waitForChildCritical(eventsFolder, "StartArenaGroup", 10, "LobbyStartMissing")
-    if not (createGroupEvent and changeSettingEvent and inviteEvent and swapTeamEvent and startArenaEvent) then
-        return
-    end
-    local playerGui = waitForChildCritical(LocalPlayer, "PlayerGui", 10, "PlayerGuiMissing")
-    if not playerGui then
-        return
-    end
-
-    local function getArenaGroupContainer()
-        local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
-        if not gui then
-            return nil
-        end
-
-        local interactionZones = gui:FindFirstChild("InteractionZones")
-        if not interactionZones then
-            return nil
-        end
-
-        local arenaGroup = interactionZones:FindFirstChild("ArenaGroup")
-        if not arenaGroup then
-            return nil
-        end
-
-        return arenaGroup:FindFirstChild("Group")
-    end
-
-    local function detectCurrentTeam()
-        local groupFolder = getArenaGroupContainer()
-        if not groupFolder then
-            return nil
-        end
-
-        for _, teamName in ipairs(TEAM_NAMES) do
-            local teamFrame = groupFolder:FindFirstChild(teamName)
-            if teamFrame then
-                local found = teamFrame:FindFirstChild(LocalPlayer.Name, true)
-                if found then
-                    return teamName
-                end
-            end
-        end
-
         return nil
     end
 
-    local function getTeamMembers(teamName)
-        local groupFolder = getArenaGroupContainer()
-        if not groupFolder then
-            return nil
-        end
-
-        local teamFrame = groupFolder:FindFirstChild(teamName)
-        if not teamFrame then
-            return nil
-        end
-
-        local added = {}
-        local members = {}
-
-        for _, desc in ipairs(teamFrame:GetDescendants()) do
-            local teammate = Players:FindFirstChild(desc.Name)
-            if teammate and not added[teammate] then
-                table.insert(members, teammate)
-                added[teammate] = true
-            end
-        end
-
-        return members
-    end
-
-    local function findEnemyPlayerInGroup()
-        local groupFolder = getArenaGroupContainer()
-        if not groupFolder then
-            return nil, nil
-        end
-
-        for _, teamName in ipairs(TEAM_NAMES) do
-            local members = getTeamMembers(teamName)
-            if members then
-                for _, player in ipairs(members) do
-                    if player ~= LocalPlayer and not TARGET_PLAYER_SET[player.Name] then
-                        return player, teamName
-                    end
-                end
-            end
-        end
-
-        return nil, nil
-    end
-
-    local function swapPlayerToOppositeTeam(targetPlayer)
-        if not targetPlayer or targetPlayer == LocalPlayer then
-            return
-        end
-
-        local ok, err = pcall(function()
-            swapTeamEvent:FireServer(targetPlayer.UserId)
-        end)
-
-        if not ok then
-            warn(string.format("[AutoPrivateLobby] Failed to swap %s: %s", targetPlayer.Name, tostring(err)))
-        end
-    end
-
-    local function ensureSoloTeam()
-        if not currentTeamName or not SWAP_TEAM_ENABLED then
-            return
-        end
-
-        local teammates = getTeamMembers(currentTeamName)
-        if not teammates then
-            return
-        end
-
-        for _, teammate in ipairs(teammates) do
-            if teammate ~= LocalPlayer then
-                swapPlayerToOppositeTeam(teammate)
-                task.wait(0.1)
-            end
-        end
-    end
-
-    local function updateTeamIfNeeded()
-        local detectedTeam = detectCurrentTeam()
-        if detectedTeam and detectedTeam ~= currentTeamName then
-            currentTeamName = detectedTeam
-            print(string.format("[AutoPrivateLobby] Detected team: %s", currentTeamName))
-            ensureSoloTeam()
-        elseif detectedTeam and detectedTeam == currentTeamName then
-            ensureSoloTeam()
-        end
-    end
-
-    local function monitorEnemyPresence()
-        task.spawn(function()
-            local lastEnemyName
-            while true do
-                local enemyPlayer, teamName = findEnemyPlayerInGroup()
-                if enemyPlayer then
-                    if enemyPlayer.Name ~= lastEnemyName then
-                        print(string.format("[AutoPrivateLobby] Enemy %s joined arena group on %s team.", enemyPlayer.Name, tostring(teamName)))
-                        lastEnemyName = enemyPlayer.Name
-                    end
-                elseif lastEnemyName then
-                    print(string.format("[AutoPrivateLobby] Enemy %s left the arena group.", lastEnemyName))
-                    lastEnemyName = nil
-                end
-                task.wait(ENEMY_CHECK_INTERVAL)
-            end
-        end)
-    end
-
     task.spawn(function()
-        while true do
-            updateTeamIfNeeded()
-            task.wait(1)
-        end
-    end)
-    monitorEnemyPresence()
-
-    playerGui.ChildAdded:Connect(function(child)
-        if child.Name == "InteractionZones" then
-            updateTeamIfNeeded()
-        end
-    end)
-
-    playerGui.DescendantAdded:Connect(function(descendant)
-        if descendant.Name == LocalPlayer.Name then
-            updateTeamIfNeeded()
-        end
-    end)
-
-    local function startArenaAfterInvites()
-        if not AUTO_START_AFTER_INVITES then
+        task.wait(24)
+        local eventsFolder = waitForChildCritical(ReplicatedStorage, "Events", 10, "SimpleLobbyEvents")
+        if not eventsFolder then
             return
         end
 
-        local ok, err = pcall(function()
-            startArenaEvent:FireServer(USE_SAME_EQUIPMENT)
+        local createGroupEvent = waitForChildCritical(eventsFolder, "CreateArenaGroup", 10, "SimpleCreateArenaGroup")
+        local changeSettingEvent = waitForChildCritical(eventsFolder, "ArenaGroupChangeSetting", 10, "SimpleChangeSetting")
+        local inviteEvent = waitForChildCritical(eventsFolder, "SendInvitePlayerToArenaGroup", 10, "SimpleInvite")
+        local startArenaEvent = waitForChildCritical(eventsFolder, "StartArenaGroup", 10, "SimpleStartArena")
+
+        if not createGroupEvent then
+            return
+        end
+
+        local okCreate, errCreate = pcall(function()
+            createGroupEvent:FireServer()
         end)
 
-        if not ok then
-            warn(string.format("[AutoPrivateLobby] Failed to start arena automatically: %s", tostring(err)))
+        if okCreate then
+            print("[AutoPrivateLobby] Fired CreateArenaGroup after 24s delay.")
         else
-            print("[AutoPrivateLobby] Auto-started arena after inviting players.")
-        end
-    end
-
-    local function invitePlayers()
-        for _, targetName in ipairs(TARGET_PLAYER_NAMES) do
-            local targetPlayer = Players:FindFirstChild(targetName)
-            if not targetPlayer then
-                local ok, found = pcall(function()
-                    return Players:WaitForChild(targetName, 5)
-                end)
-                if ok then
-                    targetPlayer = found
-                end
-            end
-
-            if not targetPlayer then
-                warn(string.format("[AutoPrivateLobby] Could not find player '%s' to invite.", targetName))
-            else
-                local ok, err = pcall(function()
-                    inviteEvent:InvokeServer(targetPlayer)
-                end)
-
-                if not ok then
-                    warn(string.format("[AutoPrivateLobby] Failed to invite %s: %s", targetPlayer.Name, tostring(err)))
-                end
-                task.wait(0.5)
-            end
-        end
-
-        task.wait(2.5)
-        startArenaAfterInvites()
-    end
-
-    local function makeLobbyPrivate()
-        if busyMakingLobby then
+            warn(string.format("[AutoPrivateLobby] Failed to fire CreateArenaGroup: %s", tostring(errCreate)))
             return
         end
 
-        busyMakingLobby = true
-
-        local ok, err = pcall(function()
-            createGroupEvent:FireServer()
-            task.wait(0.5)
-
+        if changeSettingEvent then
             for _, setting in ipairs(SETTINGS_SEQUENCE) do
-                changeSettingEvent:FireServer(setting)
+                local okSetting, errSetting = pcall(function()
+                    changeSettingEvent:FireServer(setting)
+                end)
+                if not okSetting then
+                    warn(string.format("[AutoPrivateLobby] Failed to apply '%s' setting: %s", tostring(setting), tostring(errSetting)))
+                end
                 task.wait(0.4)
             end
-
-            invitePlayers()
-        end)
-
-        if not ok then
-            warn("[AutoPrivateLobby] Failed to apply settings:", err)
         end
 
-        busyMakingLobby = false
-    end
-
-    makeLobbyPrivate()
-
-    task.spawn(function()
-        while true do
-            if not busyMakingLobby then
-                local hasTeam = detectCurrentTeam()
-                if not hasTeam then
-                    print("[AutoPrivateLobby] No arena group detected; rebuilding lobby.")
-                    makeLobbyPrivate()
+        if inviteEvent then
+            for _, targetName in ipairs(TARGET_PLAYER_NAMES) do
+                local targetPlayer = resolveTargetPlayer(targetName)
+                if not targetPlayer then
+                    warn(string.format("[AutoPrivateLobby] Could not find %s to invite.", targetName))
+                else
+                    local okInvite, errInvite = pcall(function()
+                        inviteEvent:InvokeServer(targetPlayer)
+                    end)
+                    if not okInvite then
+                        warn(string.format("[AutoPrivateLobby] Failed to invite %s: %s", targetPlayer.Name, tostring(errInvite)))
+                    end
                 end
+                task.wait(0.4)
             end
-            task.wait(8)
         end
-    end)
-
-    LocalPlayer.CharacterAdded:Connect(function()
-        task.wait(1)
-        makeLobbyPrivate()
+        task.wait(2)
+        if startArenaEvent then
+            local okStart, errStart = pcall(function()
+                startArenaEvent:FireServer(USE_SAME_EQUIPMENT)
+            end)
+            if okStart then
+                print("[AutoPrivateLobby] StartArenaGroup invoked automatically.")
+            else
+                warn(string.format("[AutoPrivateLobby] Failed to start arena: %s", tostring(errStart)))
+            end
+        end
     end)
 end
 
