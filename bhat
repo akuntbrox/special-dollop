@@ -208,53 +208,26 @@ do
     end
 end
 local function bootstrapArenaModule()
-    local function waitForChild(parent, childName)
-        if not parent then
-            return nil
-        end
-        local ok, child = pcall(function()
-            return parent:WaitForChild(childName, 5)
-        end)
-        if ok then
-            return child
-        end
-        return nil
-    end
-
-    local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts") or waitForChild(LocalPlayer, "PlayerScripts")
-    if not playerScripts then
-        warn("[AutoPrivateLobby] Failed to locate PlayerScripts while bootstrapping ArenaZone module.")
+    local eventsFolder = ReplicatedStorage:FindFirstChild("Events") or ReplicatedStorage:WaitForChild("Events", 10)
+    if not eventsFolder then
+        warn("[AutoPrivateLobby] Events folder unavailable; skipping arena bootstrap.")
         return
     end
 
-    local uiController = playerScripts:FindFirstChild("UIController") or waitForChild(playerScripts, "UIController")
-    local uiInteractionController = uiController and (uiController:FindFirstChild("UIInteractionZoneController") or waitForChild(uiController, "UIInteractionZoneController"))
-    local arenaModuleScript = uiInteractionController and (uiInteractionController:FindFirstChild("ArenaZone") or waitForChild(uiInteractionController, "ArenaZone"))
-
-    if not arenaModuleScript then
-        warn("[AutoPrivateLobby] Could not locate ArenaZone module script at the expected path.")
+    local createGroupEvent = eventsFolder:FindFirstChild("CreateArenaGroup") or eventsFolder:WaitForChild("CreateArenaGroup", 10)
+    if not createGroupEvent then
+        warn("[AutoPrivateLobby] CreateArenaGroup event missing; skipping arena bootstrap.")
         return
     end
 
-    local ok, moduleOrError = pcall(function()
-        return require(arenaModuleScript)
+    local ok, err = pcall(function()
+        createGroupEvent:FireServer()
     end)
 
-    if not ok then
-        warn(string.format("[AutoPrivateLobby] Failed to require ArenaZone module: %s", tostring(moduleOrError)))
-        return
-    end
-
-    local arenaModule = moduleOrError
-    if type(arenaModule) == "table" and type(arenaModule.Init) == "function" then
-        task.spawn(function()
-            local success, err = pcall(function()
-                arenaModule.Init()
-            end)
-            if not success then
-                warn(string.format("[AutoPrivateLobby] ArenaZone module failed to initialize: %s", tostring(err)))
-            end
-        end)
+    if ok then
+        print("[AutoPrivateLobby] Fired CreateArenaGroup during bootstrap.")
+    else
+        warn(string.format("[AutoPrivateLobby] Failed to fire CreateArenaGroup during bootstrap: %s", tostring(err)))
     end
 end
 bootstrapArenaModule()
