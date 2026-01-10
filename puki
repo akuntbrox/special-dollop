@@ -1,0 +1,384 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TeleportService = game:GetService("TeleportService")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local resultInviteEvent = ReplicatedStorage:WaitForChild("Events"):WaitForChild("ResultInviteArenaGroup")
+
+local ACCEPT_ARGS = {true, false}
+local DECLINE_ARGS = {false, true}
+
+local TARGET_DISPLAY_NAMES = {
+    "MimamAsli",
+    "Light2026",
+    "kwan1708",
+    "Vyrtoxx",
+    "DryDevil",
+    "Kiting",
+}
+
+local ACCEPT_COOLDOWN = 1.25
+local DECLINE_COOLDOWN = 0.85
+local PATH_TIMEOUT = 4
+local DECLINE_NON_TARGETS = true
+local LABEL_PATH = {"ScreenInfo", "Invites", "DungeonInvite", "Bar", "Info", "Label"}
+local INVITE_FRAME_PATH = {"ScreenInfo", "Invites", "DungeonInvite"}
+local LOG_PREFIX = "[DL-AutoInvite]"
+local AUTO_TELEPORT_JOB_ID = "" -- fallback JobId if remote link is unavailable
+local TELEPORT_PLACE_ID = game.PlaceId -- default place to teleport into
+local TELEPORT_LINK_SOURCE_URL = "https://raw.githubusercontent.com/akuntbrox/special-dollop/refs/heads/main/jobId" -- returns roblox://placeId=...&gameInstanceId=...
+
+local function formatMessage(message, ...)
+    local ok, formatted = pcall(string.format, message, ...)
+    if ok then
+        return string.format("%s %s", LOG_PREFIX, formatted)
+    end
+    return string.format("%s %s", LOG_PREFIX, tostring(message))
+end
+
+local function normalizeDisplayName(raw)
+    if typeof(raw) ~= "string" then
+        return ""
+    end
+
+    local withoutBrackets = raw:gsub("%[[^%]]*%]", "")
+    local collapsed = withoutBrackets:gsub("%s+", "")
+    if collapsed == "" then
+        return ""
+    end
+
+    return string.lower(collapsed)
+end
+
+local normalizedTargets = {}
+for _, name in ipairs(TARGET_DISPLAY_NAMES) do
+    local normalized = normalizeDisplayName(name)
+    if normalized ~= "" then
+        normalizedTargets[normalized] = true
+    end
+end
+
+if next(normalizedTargets) == nil then
+    warn(formatMessage("No target display names configured; script will remain idle."))
+end
+
+local function safeWait(parent, childName, timeout)
+    if not parent then
+        return nil
+    end
+
+    local child = parent:FindFirstChild(childName)
+    if child then
+        return child
+    end
+
+    local ok, result = pcall(parent.WaitForChild, parent, childName, timeout or PATH_TIMEOUT)
+    if ok then
+        return result
+    end
+
+    return nil
+end
+
+local function getInstanceAtPath(root, path, timeout)
+    local current = root
+    for _, node in ipairs(path) do
+        current = safeWait(current, node, timeout)
+        if not current then
+            return nil
+        end
+    end
+    return current
+end
+
+local function getInviteFrame(timeout)
+    return getInstanceAtPath(playerGui, INVITE_FRAME_PATH, timeout)
+end
+
+local function getInviteLabel(timeout)
+    return getInstanceAtPath(playerGui, LABEL_PATH, timeout)
+end
+
+local function disconnect(conn)
+    if conn then
+        conn:Disconnect()
+    end
+end
+
+local activeLabel
+local inviteFrame
+local labelTextConn
+local labelAncestryConn
+local inviteVisibleConn
+local inviteAncestryConn
+
+local function parseTeleportLink(raw)
+    if typeof(raw) ~= "string" then
+        return nil, nil
+    end
+
+    local placeId = raw:match("placeId=(%d+)")
+    if not placeId then
+        placeId = raw:match("placeid=(%d+)")
+    end
+
+    local jobId = raw:match("gameInstanceId=([%w%-]+)")
+    if not jobId then
+        jobId = raw:match("jobId=([%w%-]+)") or raw:match("instanceId=([%w%-]+)")
+    end
+
+    return tonumber(placeId), jobId
+end
+
+local function fetchRemoteTeleportTarget()
+    if TELEPORT_LINK_SOURCE_URL == "" then
+        return nil, nil
+    end
+
+    local ok, response = pcall(function()
+        return game:HttpGet(TELEPORT_LINK_SOURCE_URL)
+    end)
+
+    if not ok then
+        warn(formatMessage("Failed to fetch remote teleport link: %s", tostring(response)))
+        return nil, nil
+    end
+
+    local placeId, jobId = parseTeleportLink(response)
+    if not jobId or jobId == "" then
+        warn(formatMessage("Remote teleport link missing JobId; got: %s", tostring(response)))
+        return nil, nil
+    end
+
+    return placeId, jobId
+end
+
+local function sanitizeJobId(jobId)
+    if typeof(jobId) ~= "string" then
+        jobId = tostring(jobId or "")
+    end
+
+    jobId = jobId:gsub("%s+", "")
+    if jobId == "" then
+        return nil
+    end
+
+    return jobId
+end
+
+local function teleportToJobId(jobId, contextLabel)
+    local targetPlaceId = TELEPORT_PLACE_ID or game.PlaceId
+    if typeof(targetPlaceId) ~= "number" then
+        targetPlaceId = tonumber(targetPlaceId) or game.PlaceId
+    end
+
+    local trimmed = sanitizeJobId(jobId)
+    if not trimmed then
+        local remotePlaceId, remoteJobId = fetchRemoteTeleportTarget()
+        trimmed = sanitizeJobId(remoteJobId) or sanitizeJobId(AUTO_TELEPORT_JOB_ID)
+        if remotePlaceId then
+            targetPlaceId = remotePlaceId
+        end
+    end
+
+    if not trimmed then
+        warn(formatMessage("No JobId available%s; aborting teleport.", contextLabel and (" (" .. contextLabel .. ")") or ""))
+        return false
+    end
+
+    local ok, err = pcall(function()
+        TeleportService:TeleportToPlaceInstance(targetPlaceId, trimmed, player)
+    end)
+
+    if not ok then
+        warn(formatMessage("Teleport failed%s: %s", contextLabel and (" (" .. contextLabel .. ")") or "", tostring(err)))
+        return false
+    end
+
+    print(formatMessage("Teleporting to JobId %s (Place %s)", trimmed, tostring(targetPlaceId)))
+    return true
+end
+
+_G = _G or {}
+_G.DLTeleportToJobId = teleportToJobId
+
+do
+    local autoJobId = sanitizeJobId(AUTO_TELEPORT_JOB_ID)
+    if autoJobId or TELEPORT_LINK_SOURCE_URL ~= "" then
+        teleportToJobId(autoJobId, "AutoStart")
+    end
+end
+
+local labelSearching = false
+local lastAcceptTimestamp = 0
+local lastDeclineTimestamp = 0
+
+local function fireInviteResult(accept)
+    local ok, err = pcall(function()
+        if accept then
+            resultInviteEvent:FireServer(table.unpack(ACCEPT_ARGS))
+        else
+            resultInviteEvent:FireServer(table.unpack(DECLINE_ARGS))
+        end
+    end)
+
+    if not ok then
+        warn(formatMessage("Failed to %s invite: %s", accept and "accept" or "decline", tostring(err)))
+        return false
+    end
+
+    return true
+end
+
+local function respondToInvite(accept, rawLabel)
+    local now = os.clock()
+
+    if accept then
+        if now - lastAcceptTimestamp < ACCEPT_COOLDOWN then
+            return false
+        end
+        if fireInviteResult(true) then
+            lastAcceptTimestamp = now
+            print(formatMessage("Accepted invite from %s", rawLabel ~= "" and rawLabel or "target player"))
+            return true
+        end
+    else
+        if now - lastDeclineTimestamp < DECLINE_COOLDOWN then
+            return false
+        end
+        if fireInviteResult(false) then
+            lastDeclineTimestamp = now
+            if rawLabel and rawLabel ~= "" then
+                print(formatMessage("Declined invite from %s", rawLabel))
+            else
+                print(formatMessage("Declined invite."))
+            end
+            return true
+        end
+    end
+
+    return false
+end
+
+local function evaluateLabelText(rawText)
+    if typeof(rawText) ~= "string" or rawText == "" then
+        return
+    end
+
+    local normalized = normalizeDisplayName(rawText)
+    if normalized == "" then
+        return
+    end
+
+    if normalizedTargets[normalized] then
+        respondToInvite(true, rawText)
+    elseif DECLINE_NON_TARGETS then
+        respondToInvite(false, rawText)
+    end
+end
+
+local function disconnectLabelConnections()
+    disconnect(labelTextConn)
+    disconnect(labelAncestryConn)
+    labelTextConn = nil
+    labelAncestryConn = nil
+end
+
+local function disconnectInviteConnections()
+    disconnect(inviteVisibleConn)
+    disconnect(inviteAncestryConn)
+    inviteVisibleConn = nil
+    inviteAncestryConn = nil
+    inviteFrame = nil
+end
+
+local acquireLabel
+
+local function connectInviteFrame(frame)
+    if inviteFrame == frame and inviteVisibleConn then
+        return
+    end
+
+    disconnectInviteConnections()
+    inviteFrame = frame
+
+    if not frame then
+        return
+    end
+
+    inviteVisibleConn = frame:GetPropertyChangedSignal("Visible"):Connect(function()
+        if frame.Visible and activeLabel then
+            evaluateLabelText(activeLabel.Text)
+        end
+    end)
+
+    inviteAncestryConn = frame.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            disconnectInviteConnections()
+            activeLabel = nil
+            labelSearching = false
+            task.defer(acquireLabel)
+        end
+    end)
+end
+
+local function attachToLabel(label)
+    if activeLabel == label then
+        return
+    end
+
+    disconnectLabelConnections()
+    activeLabel = label
+
+    local frame = getInviteFrame(1) or label:FindFirstAncestor("DungeonInvite")
+    connectInviteFrame(frame)
+    evaluateLabelText(label.Text)
+
+    labelTextConn = label:GetPropertyChangedSignal("Text"):Connect(function()
+        evaluateLabelText(label.Text)
+    end)
+
+    labelAncestryConn = label.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            disconnectLabelConnections()
+            disconnectInviteConnections()
+            activeLabel = nil
+            labelSearching = false
+            task.defer(acquireLabel)
+        end
+    end)
+end
+
+acquireLabel = function()
+    if labelSearching or activeLabel then
+        return
+    end
+
+    labelSearching = true
+
+    task.spawn(function()
+        while not activeLabel do
+            local label = getInviteLabel(PATH_TIMEOUT)
+            if label then
+                attachToLabel(label)
+                break
+            end
+            task.wait(1.5)
+        end
+
+        labelSearching = false
+    end)
+end
+
+acquireLabel()
+
+playerGui.ChildAdded:Connect(function(child)
+    if child.Name == "ScreenInfo" or child.Name == "Invites" then
+        task.defer(acquireLabel)
+    end
+end)
+
+player.CharacterAdded:Connect(function()
+    task.wait(2)
+    acquireLabel()
+end)
