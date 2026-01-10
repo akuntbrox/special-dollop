@@ -4,6 +4,7 @@ local TeleportService = game:GetService("TeleportService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local resultInviteEvent = ReplicatedStorage:WaitForChild("Events"):WaitForChild("ResultInviteArenaGroup")
+local eventsFolder = ReplicatedStorage:WaitForChild("Events")
 
 local DEFAULT_LOBBY_PLACE_ID = 80620565999570
 local ARENA_PLACE_ID = 136994634055993
@@ -25,6 +26,7 @@ local LOG_PREFIX = "[DL-AutoInvite]"
 local AUTO_TELEPORT_JOB_ID = "" -- fallback JobId if remote link is unavailable
 local TELEPORT_PLACE_ID = DEFAULT_LOBBY_PLACE_ID -- default place to teleport into
 local TELEPORT_LINK_SOURCE_URL = "https://raw.githubusercontent.com/akuntbrox/special-dollop/refs/heads/main/jobId" -- returns roblox://placeId=...&gameInstanceId=...
+local ARENA_RETURN_TIMEOUT = 180
 
 local function formatMessage(message, ...)
     local ok, formatted = pcall(string.format, message, ...)
@@ -206,10 +208,70 @@ end
 _G = _G or {}
 _G.DLTeleportToJobId = teleportToJobId
 
+local arenaReturnMonitorRunning = false
+
+local function startArenaReturnMonitor()
+    if arenaReturnMonitorRunning or game.PlaceId ~= ARENA_PLACE_ID then
+        return
+    end
+    arenaReturnMonitorRunning = true
+
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local screenInfo = safeWait(playerGui, "ScreenInfo", 10)
+            if not screenInfo then
+                warn(formatMessage("Arena return monitor: ScreenInfo GUI missing."))
+                return
+            end
+
+            local arenaResultGui = safeWait(screenInfo, "ArenaResultTEST", 10)
+            if not arenaResultGui then
+                warn(formatMessage("Arena return monitor: ArenaResultTEST GUI missing."))
+                return
+            end
+
+            local function waitForVisibility(targetState, timeout)
+                local deadline = os.clock() + timeout
+                while os.clock() < deadline do
+                    if arenaResultGui.Visible == targetState then
+                        return true
+                    end
+                    task.wait(0.25)
+                end
+                return false
+            end
+
+            if arenaResultGui.Visible then
+                local hidden = waitForVisibility(false, 60)
+                if not hidden then
+                    warn(formatMessage("Arena result UI never hid; aborting auto-return."))
+                    return
+                end
+            end
+
+            local shown = waitForVisibility(true, ARENA_RETURN_TIMEOUT)
+            if not shown then
+                warn(formatMessage("Arena result UI never appeared; aborting auto-return."))
+                return
+            end
+
+            task.wait(2)
+            local returnEvent = eventsFolder:FindFirstChild("ArenaReturnToLobby") or eventsFolder:WaitForChild("ArenaReturnToLobby")
+            returnEvent:FireServer()
+            print(formatMessage("Arena result detected; returning to lobby."))
+        end)
+
+        if not ok then
+            warn(formatMessage("Arena return monitor failed: %s", tostring(err)))
+        end
+    end)
+end
+
 do
     local autoJobId = sanitizeJobId(AUTO_TELEPORT_JOB_ID)
     if game.PlaceId == ARENA_PLACE_ID then
         print(formatMessage("Arena place detected at startup; staying in current server."))
+        startArenaReturnMonitor()
     elseif game.PlaceId ~= DEFAULT_LOBBY_PLACE_ID then
         warn(formatMessage("Unexpected place (%s); redirecting to configured job.", tostring(game.PlaceId)))
         teleportToJobId(autoJobId, "NonArenaRedirect")
