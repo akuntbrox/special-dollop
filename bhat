@@ -207,56 +207,38 @@ do
         teleportToJobId(autoJob, "AutoStart")
     end
 end
+
 local function bootstrapArenaModule()
-    local function waitForChild(parent, childName)
-        if not parent then
-            return nil
-        end
-        local ok, child = pcall(function()
-            return parent:WaitForChild(childName, 5)
-        end)
-        if ok then
-            return child
-        end
-        return nil
-    end
-
-    local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts") or waitForChild(LocalPlayer, "PlayerScripts")
-    if not playerScripts then
-        warn("[AutoPrivateLobby] Failed to locate PlayerScripts while bootstrapping ArenaZone module.")
+    if game.PlaceId ~= DEFAULT_LOBBY_PLACE_ID then
         return
     end
 
-    local uiController = playerScripts:FindFirstChild("UIController") or waitForChild(playerScripts, "UIController")
-    local uiInteractionController = uiController and (uiController:FindFirstChild("UIInteractionZoneController") or waitForChild(uiController, "UIInteractionZoneController"))
-    local arenaModuleScript = uiInteractionController and (uiInteractionController:FindFirstChild("ArenaZone") or waitForChild(uiInteractionController, "ArenaZone"))
-
-    if not arenaModuleScript then
-        warn("[AutoPrivateLobby] Could not locate ArenaZone module script at the expected path.")
-        return
-    end
-
-    local ok, moduleOrError = pcall(function()
-        return require(arenaModuleScript)
-    end)
-
-    if not ok then
-        warn(string.format("[AutoPrivateLobby] Failed to require ArenaZone module: %s", tostring(moduleOrError)))
-        return
-    end
-
-    local arenaModule = moduleOrError
-    if type(arenaModule) == "table" and type(arenaModule.Init) == "function" then
-        task.spawn(function()
-            local success, err = pcall(function()
-                arenaModule.Init()
-            end)
-            if not success then
-                warn(string.format("[AutoPrivateLobby] ArenaZone module failed to initialize: %s", tostring(err)))
+    task.spawn(function()
+        local deadline = os.clock() + 45
+        while os.clock() < deadline do
+            local playerScripts = LocalPlayer:FindFirstChild("PlayerScripts")
+            local uiController = playerScripts and playerScripts:FindFirstChild("UIController")
+            local uiInteractionController = uiController and uiController:FindFirstChild("UIInteractionZoneController")
+            local arenaModuleScript = uiInteractionController and uiInteractionController:FindFirstChild("ArenaZone")
+            if arenaModuleScript then
+                local okModule, moduleOrError = pcall(function()
+                    return require(arenaModuleScript)
+                end)
+                if okModule and type(moduleOrError) == "table" and type(moduleOrError.Init) == "function" then
+                    local okInit, err = pcall(function()
+                        moduleOrError.Init()
+                    end)
+                    if not okInit then
+                        warn(string.format("[AutoPrivateLobby] ArenaZone.Init failed: %s", tostring(err)))
+                    end
+                end
+                return
             end
-        end)
-    end
+            task.wait(1)
+        end
+    end)
 end
+
 bootstrapArenaModule()
 
 local function startAutoPrivateLobby()
@@ -346,19 +328,22 @@ local function startAutoPrivateLobby()
 
             task.wait(4)
 
-            -- local equipHandler = _G.AutoMedalForceWeaponEquip
-            -- if equipHandler then
-            --     equipHandler()
-            -- else
-            --     local events = ReplicatedStorage:WaitForChild("Events")
-            --     local fallbackWeaponsEvent = events:WaitForChild("WeaponsEvent")
-            --     local ok, err = pcall(function()
-            --         fallbackWeaponsEvent:FireServer("Equip/UnEquip")
-            --     end)
-            --     if not ok then
-            --         warn(string.format("[AutoPrivateLobby] Failed to trigger fallback equip: %s", tostring(err)))
-            --     end
-            -- end
+            local equipHandler = _G.AutoMedalForceWeaponEquip
+            if equipHandler then
+                local okEquip, errEquip = pcall(equipHandler)
+                if not okEquip then
+                    warn(string.format("[AutoPrivateLobby] Failed to trigger arena equip handler: %s", tostring(errEquip)))
+                end
+            else
+                local events = ReplicatedStorage:WaitForChild("Events")
+                local fallbackWeaponsEvent = events:WaitForChild("WeaponsEvent")
+                local ok, err = pcall(function()
+                    fallbackWeaponsEvent:FireServer("Equip/UnEquip")
+                end)
+                if not ok then
+                    warn(string.format("[AutoPrivateLobby] Failed to trigger fallback equip: %s", tostring(err)))
+                end
+            end
 
             local auraHandler = _G.AutoMedalForceAuraEnable
             if auraHandler then
@@ -420,7 +405,7 @@ local function startAutoPrivateLobby()
 
         warn(string.format("[AutoPrivateLobby] Non-lobby place detected (%s). Combat prep flow triggered.", tostring(game.PlaceId)))
     end
-    task.wait(23)
+    task.wait(20)
     if game.PlaceId == ARENA_PLACE_ID then
         runNonLobbyFlow()
         return
@@ -964,12 +949,17 @@ local function startAlmostAura()
 
     local function toggleAura(state)
         if auraEnabled == state then
+            if auraEnabled and game.PlaceId ~= DEFAULT_LOBBY_PLACE_ID then
+                fireWeaponEquip()
+            end
             return
         end
         auraEnabled = state
         applyWalkSpeedState()
         if auraEnabled then
-            fireWeaponEquip()
+            if game.PlaceId ~= DEFAULT_LOBBY_PLACE_ID then
+                fireWeaponEquip()
+            end
             nextPulseTime = 0
             heartbeatConnection = RunService.Heartbeat:Connect(function()
                 local now = os.clock()
