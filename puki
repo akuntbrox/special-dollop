@@ -13,6 +13,7 @@ local DECLINE_ARGS = {false, true}
 
 local TARGET_DISPLAY_NAMES = {
     "MimamAsli",
+    "cangcimen12355",
     "Light2026",
 }
 
