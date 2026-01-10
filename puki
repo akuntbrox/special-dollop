@@ -5,6 +5,8 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 local resultInviteEvent = ReplicatedStorage:WaitForChild("Events"):WaitForChild("ResultInviteArenaGroup")
 
+local DEFAULT_LOBBY_PLACE_ID = 80620565999570
+local ARENA_PLACE_ID = 136994634055993
 local ACCEPT_ARGS = {true, false}
 local DECLINE_ARGS = {false, true}
 
@@ -21,7 +23,7 @@ local LABEL_PATH = {"ScreenInfo", "Invites", "DungeonInvite", "Bar", "Info", "La
 local INVITE_FRAME_PATH = {"ScreenInfo", "Invites", "DungeonInvite"}
 local LOG_PREFIX = "[DL-AutoInvite]"
 local AUTO_TELEPORT_JOB_ID = "" -- fallback JobId if remote link is unavailable
-local TELEPORT_PLACE_ID = game.PlaceId -- default place to teleport into
+local TELEPORT_PLACE_ID = DEFAULT_LOBBY_PLACE_ID -- default place to teleport into
 local TELEPORT_LINK_SOURCE_URL = "https://raw.githubusercontent.com/akuntbrox/special-dollop/refs/heads/main/jobId" -- returns roblox://placeId=...&gameInstanceId=...
 
 local function formatMessage(message, ...)
@@ -182,6 +184,12 @@ local function teleportToJobId(jobId, contextLabel)
         return false
     end
 
+    local currentJobId = sanitizeJobId(game.JobId)
+    if currentJobId and currentJobId == trimmed and targetPlaceId == game.PlaceId then
+        print(formatMessage("Already in target JobId %s; skipping teleport.", trimmed))
+        return false
+    end
+
     local ok, err = pcall(function()
         TeleportService:TeleportToPlaceInstance(targetPlaceId, trimmed, player)
     end)
@@ -200,7 +208,12 @@ _G.DLTeleportToJobId = teleportToJobId
 
 do
     local autoJobId = sanitizeJobId(AUTO_TELEPORT_JOB_ID)
-    if autoJobId or TELEPORT_LINK_SOURCE_URL ~= "" then
+    if game.PlaceId == ARENA_PLACE_ID then
+        print(formatMessage("Arena place detected at startup; staying in current server."))
+    elseif game.PlaceId ~= DEFAULT_LOBBY_PLACE_ID then
+        warn(formatMessage("Unexpected place (%s); redirecting to configured job.", tostring(game.PlaceId)))
+        teleportToJobId(autoJobId, "NonArenaRedirect")
+    elseif autoJobId or TELEPORT_LINK_SOURCE_URL ~= "" then
         teleportToJobId(autoJobId, "AutoStart")
     end
 end
