@@ -305,7 +305,7 @@ local function startAutoPrivateLobby()
         end
 
         local okCreate, errCreate = pcall(function()
-            createGroupEvent:FireServer()
+            game:GetService("ReplicatedStorage"):FindFirstChild("Events"):FindFirstChild("CreateArenaGroup"):FireServer()
         end)
 
         if okCreate then
