@@ -1,0 +1,110 @@
+-- Lightweight anti-lag + anti-AFK helper. Strips expensive visuals, forces low
+-- fidelity rendering and keeps the session alive by simulating idle input.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Lighting = game:GetService("Lighting")
+local VirtualUser = game:GetService("VirtualUser")
+
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+
+local SMOOTH_SURFACE = Enum.SurfaceType.SmoothNoOutlines
+local ZERO_VECTOR = Vector2.new()
+
+local function sanitizeTerrain()
+    local terrain = workspace:FindFirstChildWhichIsA("Terrain")
+    if not terrain then
+        return
+    end
+
+    terrain.WaterWaveSize = 0
+    terrain.WaterWaveSpeed = 0
+    terrain.WaterReflectance = 0
+    terrain.WaterTransparency = 1
+end
+
+local function sanitizeLighting()
+    Lighting.GlobalShadows = false
+    Lighting.FogStart = 9e9
+    Lighting.FogEnd = 9e9
+
+    for _, descendant in ipairs(Lighting:GetDescendants()) do
+        if descendant:IsA("PostEffect") then
+            descendant.Enabled = false
+        end
+    end
+
+    Lighting.DescendantAdded:Connect(function(descendant)
+        if descendant:IsA("PostEffect") then
+            descendant.Enabled = false
+        end
+    end)
+end
+
+local function stripBasePart(part)
+    part.CastShadow = false
+    part.Material = Enum.Material.Plastic
+    part.Reflectance = 0
+    part.BackSurface = SMOOTH_SURFACE
+    part.BottomSurface = SMOOTH_SURFACE
+    part.FrontSurface = SMOOTH_SURFACE
+    part.LeftSurface = SMOOTH_SURFACE
+    part.RightSurface = SMOOTH_SURFACE
+    part.TopSurface = SMOOTH_SURFACE
+    if part:IsA("MeshPart") then
+        part.TextureID = ""
+    end
+end
+
+local function stripVisual(instance)
+    if instance:IsA("BasePart") then
+        stripBasePart(instance)
+    elseif instance:IsA("Decal") or instance:IsA("Texture") then
+        instance.Transparency = 1
+        instance.Texture = ""
+    elseif instance:IsA("ParticleEmitter") then
+        instance.Lifetime = NumberRange.new(0)
+        instance.Enabled = false
+    elseif instance:IsA("Trail") then
+        instance.Lifetime = 0
+        instance.Enabled = false
+    elseif instance:IsA("Beam") or instance:IsA("ForceField") or instance:IsA("Smoke") or instance:IsA("Fire") or instance:IsA("Sparkles") then
+        task.defer(function()
+            if instance.Parent then
+                instance:Destroy()
+            end
+        end)
+    end
+end
+
+local function sanitizeWorkspace()
+    settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+
+    for _, descendant in ipairs(game:GetDescendants()) do
+        stripVisual(descendant)
+    end
+
+    workspace.DescendantAdded:Connect(function(descendant)
+        -- Give Roblox a heartbeat to finish property replication before editing.
+        RunService.Heartbeat:Wait()
+        stripVisual(descendant)
+    end)
+end
+
+local function initAntiAFK()
+    LocalPlayer.Idled:Connect(function()
+        -- Minimal camera jolt to reset the idle timer.
+        VirtualUser:Button2Down(ZERO_VECTOR, workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
+        task.wait(0.5)
+        VirtualUser:Button2Up(ZERO_VECTOR, workspace.CurrentCamera and workspace.CurrentCamera.CFrame or CFrame.new())
+    end)
+end
+
+sanitizeTerrain()
+sanitizeLighting()
+sanitizeWorkspace()
+initAntiAFK()
