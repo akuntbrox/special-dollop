@@ -1,4 +1,4 @@
--- Bundles the auto-private-lobby helper with the almost-aura helper so both systems can run from a single script.
+-- V2 of the auto medal helper: same overall flow but with sturdier equip/aura handling and lobby enemy monitoring.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -11,12 +11,71 @@ local ARENA_PLACE_ID = 136994634055993
 local TELEPORT_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
 local TELEPORT_LINK_SOURCE_URL = "https://raw.githubusercontent.com/akuntbrox/special-dollop/refs/heads/main/jobId"
 local AUTO_TELEPORT_JOB_ID = ""
+local SETTINGS_SEQUENCE = {"Private", "Map"}
+local TARGET_PLAYER_NAMES = {"Cetinowalliw54"}
+local TARGET_PLAYER_SET = {}
+for _, target in ipairs(TARGET_PLAYER_NAMES) do
+    TARGET_PLAYER_SET[target] = true
+end
+local ENEMY_CHECK_INTERVAL = 3
+local CRITICAL_CHILD_TIMEOUT = 12
+local REJOIN_DELAY = 5
+local MAX_REJOIN_ATTEMPTS = 3
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+
+local rejoinInProgress = false
+local rejoinAttempts = 0
+
+local function scheduleRejoin(reason)
+    if rejoinInProgress then
+        return
+    end
+    rejoinInProgress = true
+    rejoinAttempts += 1
+    warn(string.format("[AutoPrivateLobby] Scheduling rejoin (%s). Attempt %d.", tostring(reason or "unknown"), rejoinAttempts))
+
+    task.spawn(function()
+        task.wait(REJOIN_DELAY)
+        local ok, err = pcall(function()
+            TeleportService:Teleport(TELEPORT_PLACE_ID, LocalPlayer)
+        end)
+        if not ok then
+            warn(string.format("[AutoPrivateLobby] Failed to rejoin automatically: %s", tostring(err)))
+            rejoinInProgress = false
+            if rejoinAttempts < MAX_REJOIN_ATTEMPTS then
+                scheduleRejoin(reason)
+            end
+        end
+    end)
+end
+
+local function waitForChildCritical(parent, childName, timeout, reasonTag)
+    if not parent then
+        scheduleRejoin(reasonTag or ("MissingParent:" .. tostring(childName)))
+        return nil
+    end
+    local deadline = os.clock() + (timeout or CRITICAL_CHILD_TIMEOUT)
+    local child = parent:FindFirstChild(childName)
+    while not child and os.clock() < deadline do
+        local ok, result = pcall(function()
+            return parent:WaitForChild(childName, 1)
+        end)
+        if ok and result then
+            child = result
+            break
+        end
+    end
+    if not child then
+        warn(string.format("[AutoPrivateLobby] Critical instance '%s' missing under %s. Rejoining.", tostring(childName), parent.Name))
+        scheduleRejoin(reasonTag or ("MissingChild:" .. tostring(childName)))
+    end
+    return child
+end
 
 local playerReady = false
 
@@ -208,27 +267,7 @@ do
     end
 end
 local function bootstrapArenaModule()
-    local eventsFolder = ReplicatedStorage:FindFirstChild("Events") or ReplicatedStorage:WaitForChild("Events", 10)
-    if not eventsFolder then
-        warn("[AutoPrivateLobby] Events folder unavailable; skipping arena bootstrap.")
-        return
-    end
-
-    local createGroupEvent = eventsFolder:FindFirstChild("CreateArenaGroup") or eventsFolder:WaitForChild("CreateArenaGroup", 10)
-    if not createGroupEvent then
-        warn("[AutoPrivateLobby] CreateArenaGroup event missing; skipping arena bootstrap.")
-        return
-    end
-
-    local ok, err = pcall(function()
-        createGroupEvent:FireServer()
-    end)
-
-    if ok then
-        print("[AutoPrivateLobby] Fired CreateArenaGroup during bootstrap.")
-    else
-        warn(string.format("[AutoPrivateLobby] Failed to fire CreateArenaGroup during bootstrap: %s", tostring(err)))
-    end
+    print("[AutoPrivateLobby] Bootstrap disabled; no events fired on load.")
 end
 bootstrapArenaModule()
 
@@ -244,8 +283,6 @@ local function startAutoPrivateLobby()
     local USE_SAME_EQUIPMENT = false
     local TEAM_NAMES = {"Blue", "Red"}
     local SWAP_TEAM_ENABLED = false
-    local SETTINGS_SEQUENCE = {"Private", "Map"}
-    local TARGET_PLAYER_NAMES = {"nnunotuna561"}
     local busyMakingLobby = false
     local currentTeamName
 
@@ -296,11 +333,11 @@ local function startAutoPrivateLobby()
         return true
     end
 
-    local function runNonLobbyFlow()
-        task.spawn(function()
-            if not game:IsLoaded() then
-                game.Loaded:Wait()
-            end
+local function runNonLobbyFlow()
+    task.spawn(function()
+        if not game:IsLoaded() then
+            game.Loaded:Wait()
+        end
 
             local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
             if not character then
@@ -319,19 +356,29 @@ local function startAutoPrivateLobby()
 
             task.wait(4)
 
-            -- local equipHandler = _G.AutoMedalForceWeaponEquip
-            -- if equipHandler then
-            --     equipHandler()
-            -- else
-            --     local events = ReplicatedStorage:WaitForChild("Events")
-            --     local fallbackWeaponsEvent = events:WaitForChild("WeaponsEvent")
-            --     local ok, err = pcall(function()
-            --         fallbackWeaponsEvent:FireServer("Equip/UnEquip")
-            --     end)
-            --     if not ok then
-            --         warn(string.format("[AutoPrivateLobby] Failed to trigger fallback equip: %s", tostring(err)))
-            --     end
-            -- end
+            local function ensureEquipped()
+                local equipHandler = _G.AutoMedalForceWeaponEquip
+                if equipHandler then
+                    equipHandler()
+                    return
+                end
+                local okEquip, errEquip = pcall(function()
+                    local events = waitForChildCritical(ReplicatedStorage, "Events", 8, "ArenaEquipEvents")
+                    if not events then
+                        return
+                    end
+                    local fallbackWeaponsEvent = waitForChildCritical(events, "WeaponsEvent", 8, "ArenaWeaponsEventMissing")
+                    if not fallbackWeaponsEvent then
+                        return
+                    end
+                    fallbackWeaponsEvent:FireServer("Equip/UnEquip")
+                end)
+                if not okEquip then
+                    warn(string.format("[AutoPrivateLobby] Failed to trigger fallback equip: %s", tostring(errEquip)))
+                end
+            end
+
+            ensureEquipped()
 
             local auraHandler = _G.AutoMedalForceAuraEnable
             if auraHandler then
@@ -380,10 +427,12 @@ local function startAutoPrivateLobby()
                 end
 
                 task.wait(2)
-                local events = ReplicatedStorage:WaitForChild("Events")
-                local returnEvent = events:FindFirstChild("ArenaReturnToLobby") or events:WaitForChild("ArenaReturnToLobby")
-                returnEvent:FireServer()
-                print("[AutoPrivateLobby] Arena result detected; returning to lobby.")
+                local events = waitForChildCritical(ReplicatedStorage, "Events", 8, "ArenaReturnEvents")
+                local returnEvent = events and waitForChildCritical(events, "ArenaReturnToLobby", 8, "ArenaReturnMissing")
+                if returnEvent then
+                    returnEvent:FireServer()
+                    print("[AutoPrivateLobby] Arena result detected; returning to lobby.")
+                end
             end)
 
             if not okReturn then
@@ -393,7 +442,8 @@ local function startAutoPrivateLobby()
 
         warn(string.format("[AutoPrivateLobby] Non-lobby place detected (%s). Combat prep flow triggered.", tostring(game.PlaceId)))
     end
-    task.wait(23)
+    task.wait(24)
+    print("[AutoPrivateLobby] Lobby detected; starting automated private lobby sequence.")
     if game.PlaceId == ARENA_PLACE_ID then
         runNonLobbyFlow()
         return
@@ -408,13 +458,22 @@ local function startAutoPrivateLobby()
         return
     end
 
-    local eventsFolder = ReplicatedStorage:WaitForChild("Events")
-    local createGroupEvent = eventsFolder:WaitForChild("CreateArenaGroup")
-    local changeSettingEvent = eventsFolder:WaitForChild("ArenaGroupChangeSetting")
-    local inviteEvent = eventsFolder:WaitForChild("SendInvitePlayerToArenaGroup")
-    local swapTeamEvent = eventsFolder:WaitForChild("SwapArenaTeam")
-    local startArenaEvent = eventsFolder:WaitForChild("StartArenaGroup")
-    local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local eventsFolder = waitForChildCritical(ReplicatedStorage, "Events", 10, "LobbyEventsMissing")
+    if not eventsFolder then
+        return
+    end
+    local createGroupEvent = waitForChildCritical(eventsFolder, "CreateArenaGroup", 10, "LobbyCreateGroupMissing")
+    local changeSettingEvent = waitForChildCritical(eventsFolder, "ArenaGroupChangeSetting", 10, "LobbyChangeSettingMissing")
+    local inviteEvent = waitForChildCritical(eventsFolder, "SendInvitePlayerToArenaGroup", 10, "LobbyInviteMissing")
+    local swapTeamEvent = waitForChildCritical(eventsFolder, "SwapArenaTeam", 10, "LobbySwapMissing")
+    local startArenaEvent = waitForChildCritical(eventsFolder, "StartArenaGroup", 10, "LobbyStartMissing")
+    if not (createGroupEvent and changeSettingEvent and inviteEvent and swapTeamEvent and startArenaEvent) then
+        return
+    end
+    local playerGui = waitForChildCritical(LocalPlayer, "PlayerGui", 10, "PlayerGuiMissing")
+    if not playerGui then
+        return
+    end
 
     local function getArenaGroupContainer()
         local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
@@ -479,6 +538,26 @@ local function startAutoPrivateLobby()
         return members
     end
 
+    local function findEnemyPlayerInGroup()
+        local groupFolder = getArenaGroupContainer()
+        if not groupFolder then
+            return nil, nil
+        end
+
+        for _, teamName in ipairs(TEAM_NAMES) do
+            local members = getTeamMembers(teamName)
+            if members then
+                for _, player in ipairs(members) do
+                    if player ~= LocalPlayer and not TARGET_PLAYER_SET[player.Name] then
+                        return player, teamName
+                    end
+                end
+            end
+        end
+
+        return nil, nil
+    end
+
     local function swapPlayerToOppositeTeam(targetPlayer)
         if not targetPlayer or targetPlayer == LocalPlayer then
             return
@@ -522,12 +601,32 @@ local function startAutoPrivateLobby()
         end
     end
 
+    local function monitorEnemyPresence()
+        task.spawn(function()
+            local lastEnemyName
+            while true do
+                local enemyPlayer, teamName = findEnemyPlayerInGroup()
+                if enemyPlayer then
+                    if enemyPlayer.Name ~= lastEnemyName then
+                        print(string.format("[AutoPrivateLobby] Enemy %s joined arena group on %s team.", enemyPlayer.Name, tostring(teamName)))
+                        lastEnemyName = enemyPlayer.Name
+                    end
+                elseif lastEnemyName then
+                    print(string.format("[AutoPrivateLobby] Enemy %s left the arena group.", lastEnemyName))
+                    lastEnemyName = nil
+                end
+                task.wait(ENEMY_CHECK_INTERVAL)
+            end
+        end)
+    end
+
     task.spawn(function()
         while true do
             updateTeamIfNeeded()
             task.wait(1)
         end
     end)
+    monitorEnemyPresence()
 
     playerGui.ChildAdded:Connect(function(child)
         if child.Name == "InteractionZones" then
@@ -615,6 +714,19 @@ local function startAutoPrivateLobby()
 
     makeLobbyPrivate()
 
+    task.spawn(function()
+        while true do
+            if not busyMakingLobby then
+                local hasTeam = detectCurrentTeam()
+                if not hasTeam then
+                    print("[AutoPrivateLobby] No arena group detected; rebuilding lobby.")
+                    makeLobbyPrivate()
+                end
+            end
+            task.wait(8)
+        end
+    end)
+
     LocalPlayer.CharacterAdded:Connect(function()
         task.wait(1)
         makeLobbyPrivate()
@@ -622,17 +734,39 @@ local function startAutoPrivateLobby()
 end
 
 local function startAlmostAura()
-    local Events = ReplicatedStorage:WaitForChild("Events")
-    local ModelsFolder = ReplicatedStorage:WaitForChild("Models")
-    local ClientHitbox = ModelsFolder:WaitForChild("ClientAroundHitbox")
-    local WeaponsEvent = Events:WaitForChild("WeaponsEvent")
+    local EventsFolder = waitForChildCritical(ReplicatedStorage, "Events", 10, "AuraEventsMissing")
+    local ModelsFolder = waitForChildCritical(ReplicatedStorage, "Models", 10, "AuraModelsMissing")
+    if not (EventsFolder and ModelsFolder) then
+        return
+    end
+    local ClientHitbox = waitForChildCritical(ModelsFolder, "ClientAroundHitbox", 10, "AuraClientHitboxMissing")
+    local WeaponsEvent = waitForChildCritical(EventsFolder, "WeaponsEvent", 10, "AuraWeaponsEventMissing")
+    local AttackEvent = waitForChildCritical(EventsFolder, "AttackV2", 10, "AuraAttackMissing")
+    local VFXEvent = waitForChildCritical(EventsFolder, "VFX_Client", 10, "AuraVFXMissing")
+    if not (ClientHitbox and WeaponsEvent and AttackEvent and VFXEvent) then
+        return
+    end
+
+    local lastEquipTime = 0
+    local equipInProgress = false
+    local EQUIP_COOLDOWN = 1.5
 
     local function fireWeaponEquip()
+        local now = os.clock()
+        if equipInProgress then
+            return true
+        end
+        if now - lastEquipTime < EQUIP_COOLDOWN then
+            return true
+        end
+        equipInProgress = true
         local ok, err = pcall(function()
-            local args = {"Equip/UnEquip"}
-            WeaponsEvent:FireServer(table.unpack(args))
+            WeaponsEvent:FireServer("Equip/UnEquip")
         end)
-        if not ok then
+        equipInProgress = false
+        if ok then
+            lastEquipTime = now
+        else
             warn(string.format("[AuraKill] Failed to prep weapon equip: %s", tostring(err)))
         end
         return ok
@@ -658,65 +792,6 @@ local function startAlmostAura()
         CharHitBox = true;
     }
 
-    local DEFAULT_WALK_SPEED = 16
-    local BOOST_WALK_SPEED = 45
-    local BaseWalkSpeed = DEFAULT_WALK_SPEED
-    local StoredWalkSpeed = nil
-    local WalkSpeedConnection = nil
-    local suppressWalkSpeedEvent = false
-    local speedBoostEnabled = true
-
-    local function applyWalkSpeedState()
-        local humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
-        if not humanoid then
-            return
-        end
-        if speedBoostEnabled then
-            if StoredWalkSpeed == nil then
-                StoredWalkSpeed = humanoid.WalkSpeed ~= 0 and humanoid.WalkSpeed or BaseWalkSpeed
-            end
-            if humanoid.WalkSpeed ~= BOOST_WALK_SPEED then
-                suppressWalkSpeedEvent = true
-                humanoid.WalkSpeed = BOOST_WALK_SPEED
-                suppressWalkSpeedEvent = false
-            end
-        else
-            local target = StoredWalkSpeed or BaseWalkSpeed or DEFAULT_WALK_SPEED
-            StoredWalkSpeed = nil
-            if humanoid.WalkSpeed ~= target then
-                suppressWalkSpeedEvent = true
-                humanoid.WalkSpeed = target
-                suppressWalkSpeedEvent = false
-            end
-            BaseWalkSpeed = humanoid.WalkSpeed
-        end
-    end
-
-    local function bindHumanoidSpeed(humanoid)
-        if WalkSpeedConnection then
-            WalkSpeedConnection:Disconnect()
-            WalkSpeedConnection = nil
-        end
-        if not humanoid then
-            return
-        end
-        BaseWalkSpeed = humanoid.WalkSpeed or DEFAULT_WALK_SPEED
-        WalkSpeedConnection = humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-            if suppressWalkSpeedEvent then
-                return
-            end
-            if speedBoostEnabled then
-                if humanoid.WalkSpeed ~= BOOST_WALK_SPEED then
-                    suppressWalkSpeedEvent = true
-                    humanoid.WalkSpeed = BOOST_WALK_SPEED
-                    suppressWalkSpeedEvent = false
-                end
-            else
-                BaseWalkSpeed = humanoid.WalkSpeed
-            end
-        end)
-    end
-
     local function setCharacter(char)
         Character = char
         HumanoidRootPart = nil
@@ -726,9 +801,6 @@ local function startAlmostAura()
         end
         task.spawn(function()
             HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 5)
-            local humanoid = HumanoidRootPart and HumanoidRootPart.Parent and HumanoidRootPart.Parent:FindFirstChildOfClass("Humanoid")
-            bindHumanoidSpeed(humanoid)
-            applyWalkSpeedState()
         end)
     end
 
@@ -857,17 +929,17 @@ local function startAlmostAura()
         local payload = buildPayload(target)
         local directionString = getDirectionString(target)
         beginAttackingState()
-        Events.AttackV2:FireServer(1, stage)
+        AttackEvent:FireServer(1, stage)
         local directionArgs = {4, stage}
         directionArgs[4] = directionString
-        Events.AttackV2:FireServer(table.unpack(directionArgs))
-        Events.AttackV2:FireServer(5, stage, payload)
+        AttackEvent:FireServer(table.unpack(directionArgs))
+        AttackEvent:FireServer(5, stage, payload)
         if Character and Character:GetAttribute("Subclass") == "Assassin" and stage == MAX_COMBO_STAGE then
-            Events.AttackV2:FireServer(5, stage, payload)
+            AttackEvent:FireServer(5, stage, payload)
         end
-        Events.AttackV2:FireServer(3, stage)
-        Events.VFX_Client:Fire("BL", target)
-        Events.VFX_Client:Fire("H", target)
+        AttackEvent:FireServer(3, stage)
+        VFXEvent:Fire("BL", target)
+        VFXEvent:Fire("H", target)
         task.delay(ATTACK_ATTR_TIMEOUT, endAttackingState)
     end
 
@@ -940,9 +1012,8 @@ local function startAlmostAura()
             return
         end
         auraEnabled = state
-        applyWalkSpeedState()
         if auraEnabled then
-            fireWeaponEquip()
+            -- fireWeaponEquip()
             nextPulseTime = 0
             heartbeatConnection = RunService.Heartbeat:Connect(function()
                 local now = os.clock()
@@ -956,18 +1027,6 @@ local function startAlmostAura()
             heartbeatConnection = nil
         end
         print(string.format("[AuraKill] %s", auraEnabled and "enabled" or "disabled"))
-    end
-
-    local function toggleSpeedBoost(state)
-        if state == nil then
-            state = not speedBoostEnabled
-        end
-        if speedBoostEnabled == state then
-            return
-        end
-        speedBoostEnabled = state
-        applyWalkSpeedState()
-        print(string.format("[AuraKill] Walk speed boost %s", speedBoostEnabled and "enabled" or "disabled"))
     end
 
     local autoAuraTaskId = 0
@@ -1011,10 +1070,14 @@ local function startAlmostAura()
         end)
     end
 
-    scheduleAutoAuraEnable()
-    LocalPlayer.CharacterAdded:Connect(function()
+    if game.PlaceId == ARENA_PLACE_ID then
         scheduleAutoAuraEnable()
-    end)
+        LocalPlayer.CharacterAdded:Connect(function()
+            scheduleAutoAuraEnable()
+        end)
+    else
+        print("[AuraKill] Lobby detected; auto aura/equip skipped.")
+    end
 
     _G.AutoMedalForceWeaponEquip = fireWeaponEquip
     _G.AutoMedalForceAuraEnable = function()
