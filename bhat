@@ -11,7 +11,7 @@ local ARENA_PLACE_ID = 136994634055993
 local TELEPORT_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
 local AUTO_TELEPORT_JOB_ID = "112e0603-56a7-4865-81fe-437f0f774584" -- set to your desired JobId when you want automatic teleports
 local SETTINGS_SEQUENCE = {"Private", "Map"}
-local TARGET_PLAYER_NAMES = {"Xmj688"}
+local TARGET_PLAYER_NAMES = {"roblox_user_9544929123"}
 local TARGET_PLAYER_SET = {}
 for _, target in ipairs(TARGET_PLAYER_NAMES) do
     TARGET_PLAYER_SET[target] = true
