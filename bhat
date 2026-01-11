@@ -257,6 +257,77 @@ local function bootstrapArenaModule()
 end
 bootstrapArenaModule()
 
+local function startArenaEmptyReturnMonitor()
+    if game.PlaceId ~= ARENA_PLACE_ID then
+        return
+    end
+
+    local teleportScheduled = false
+
+    local function hasOtherPlayers()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function scheduleReturnIfNeeded()
+        if game.PlaceId ~= ARENA_PLACE_ID then
+            teleportScheduled = false
+            return
+        end
+        if teleportScheduled then
+            return
+        end
+        if hasOtherPlayers() then
+            return
+        end
+        teleportScheduled = true
+        task.spawn(function()
+            waitForPlayerReady()
+            task.wait(3)
+            if game.PlaceId ~= ARENA_PLACE_ID then
+                return
+            end
+            local configuredPlaceId, configuredJobId = getConfiguredTeleportTarget()
+            if configuredJobId then
+                teleportToJobId(configuredJobId, "ArenaEmptyReturn", configuredPlaceId)
+            else
+                local fallbackPlace = TELEPORT_PLACE_ID or DEFAULT_LOBBY_PLACE_ID
+                if typeof(fallbackPlace) ~= "number" then
+                    fallbackPlace = tonumber(fallbackPlace) or DEFAULT_LOBBY_PLACE_ID
+                end
+                local ok, err = pcall(function()
+                    TeleportService:Teleport(fallbackPlace, LocalPlayer)
+                end)
+                if not ok then
+                    warn(string.format("[AutoPrivateLobby] Failed to teleport from empty arena: %s", tostring(err)))
+                end
+            end
+        end)
+    end
+
+    scheduleReturnIfNeeded()
+
+    Players.PlayerAdded:Connect(function(player)
+        if game.PlaceId ~= ARENA_PLACE_ID then
+            return
+        end
+        if player ~= LocalPlayer then
+            teleportScheduled = false
+        end
+    end)
+
+    Players.PlayerRemoving:Connect(function(player)
+        if player == LocalPlayer then
+            return
+        end
+        task.defer(scheduleReturnIfNeeded)
+    end)
+end
+
 local function startAutoPrivateLobby()
     local LOBBY_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
     local TELEPORT_POSITION = Vector3.new(-224, 15, -798)
@@ -1074,5 +1145,6 @@ local function startAlmostAura()
 end
 
 waitForPlayerReady()
+startArenaEmptyReturnMonitor()
 startAlmostAura()
 startAutoPrivateLobby()
