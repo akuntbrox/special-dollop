@@ -13,8 +13,15 @@ local DECLINE_ARGS = {false, true}
 
 local TARGET_DISPLAY_NAMES = {
     "MimamAsli",
-    "cangcimen12355",
     "Light2026",
+    "AsepNgawi",
+    "cangcimen12355",
+    "kwan1708",
+    "Casanova",
+    "DryDevil",
+    "Mimam",
+    "vanillabiscoff",
+    "Kiting",
 }
 
 local ACCEPT_COOLDOWN = 1.25
