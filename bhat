@@ -18,6 +18,32 @@ for _, target in ipairs(TARGET_PLAYER_NAMES) do
 end
 local ENEMY_CHECK_INTERVAL = 3
 local CRITICAL_CHILD_TIMEOUT = 12
+local HOTBAR_NAMES = {"HotBar", "MobileHotBar", "TouchHotBar"}
+local HOTBAR_INFO_NAMES = {"Info", "InfoMobile", "MobileInfo", "TouchInfo"}
+
+local function findFirstChildByNames(parent, names, waitTime)
+    if not parent then
+        return nil, nil
+    end
+    for _, name in ipairs(names) do
+        local child = parent:FindFirstChild(name)
+        if child then
+            return child, name
+        end
+    end
+    if waitTime and waitTime > 0 and #names > 0 then
+        local perNameTimeout = math.max(waitTime / #names, 0.5)
+        for _, name in ipairs(names) do
+            local ok, result = pcall(function()
+                return parent:WaitForChild(name, perNameTimeout)
+            end)
+            if ok and result then
+                return result, name
+            end
+        end
+    end
+    return nil, nil
+end
 
 if not game:IsLoaded() then
     game.Loaded:Wait()
@@ -92,23 +118,34 @@ local function waitForPlayerReady()
         end)
 
         local hotbar = playerGui:FindFirstChild("HotBar")
+        local hotbarName = hotbar and "HotBar" or nil
         if not hotbar then
             local ok, result = pcall(function()
-                return playerGui:WaitForChild("HotBar", 10)
+                return playerGui:WaitForChild("HotBar", 5)
             end)
-            if ok then
+            if ok and result then
                 hotbar = result
+                hotbarName = "HotBar"
             end
+        end
+        if not hotbar then
+            hotbar, hotbarName = findFirstChildByNames(playerGui, HOTBAR_NAMES, 10)
         end
 
         if hotbar then
-            local infoFrame = hotbar:FindFirstChild("Info")
-            if not infoFrame then
-                local ok, result = pcall(function()
-                    return hotbar:WaitForChild("Info", 10)
-                end)
-                if ok then
-                    infoFrame = result
+            local infoFrame = nil
+            if hotbar:IsA("GuiObject") then
+                infoFrame = hotbar:FindFirstChild("Info")
+                if not infoFrame then
+                    local ok, result = pcall(function()
+                        return hotbar:WaitForChild("Info", 5)
+                    end)
+                    if ok and result then
+                        infoFrame = result
+                    end
+                end
+                if not infoFrame then
+                    infoFrame = findFirstChildByNames(hotbar, HOTBAR_INFO_NAMES, 10)
                 end
             end
 
@@ -128,7 +165,11 @@ local function waitForPlayerReady()
                 if not infoFrame.Visible then
                     warn("[AutoPrivateLobby] HotBar.Info never became visible; continuing anyway.")
                 end
+            else
+                warn(string.format("[AutoPrivateLobby] %s missing Info child (expected %s); continuing.", hotbarName or "HotBar", table.concat(HOTBAR_INFO_NAMES, "/")))
             end
+        else
+            warn(string.format("[AutoPrivateLobby] No supported HotBar found (looked for: %s); continuing anyway.", table.concat(HOTBAR_NAMES, "/")))
         end
     end
 
