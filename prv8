@@ -1,0 +1,1152 @@
+-- V2 of the auto medal helper: same overall flow but with sturdier equip/aura handling and lobby enemy monitoring.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Debris = game:GetService("Debris")
+local TeleportService = game:GetService("TeleportService")
+
+local DEFAULT_LOBBY_PLACE_ID = 80620565999570
+local ARENA_PLACE_ID = 136994634055993
+local TELEPORT_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
+local AUTO_TELEPORT_JOB_ID = "6203de89-1816-4cd4-81f6-ddb1cbc44871" -- set to your desired JobId when you want automatic teleports
+local nonpvpwait = 2
+local lobbywaits = 26
+local SETTINGS_SEQUENCE = {"Private", "Map"}
+local TARGET_PLAYER_NAMES = {"navulettutan52"}
+local TARGET_PLAYER_SET = {}
+for _, target in ipairs(TARGET_PLAYER_NAMES) do
+    TARGET_PLAYER_SET[target] = true
+end
+local ENEMY_CHECK_INTERVAL = 3
+local CRITICAL_CHILD_TIMEOUT = 12
+local HOTBAR_NAMES = {"HotBar", "MobileHotBar", "TouchHotBar"}
+local HOTBAR_INFO_NAMES = {"Info", "InfoMobile", "MobileInfo", "TouchInfo"}
+
+local function findFirstChildByNames(parent, names, waitTime)
+    if not parent then
+        return nil, nil
+    end
+    for _, name in ipairs(names) do
+        local child = parent:FindFirstChild(name)
+        if child then
+            return child, name
+        end
+    end
+    if waitTime and waitTime > 0 and #names > 0 then
+        local perNameTimeout = math.max(waitTime / #names, 0.5)
+        for _, name in ipairs(names) do
+            local ok, result = pcall(function()
+                return parent:WaitForChild(name, perNameTimeout)
+            end)
+            if ok and result then
+                return result, name
+            end
+        end
+    end
+    return nil, nil
+end
+
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local AutoMedalTeleportToJobId
+local AutoMedalForceWeaponEquip
+local AutoMedalForceAuraEnable
+
+local function waitForChildCritical(parent, childName, timeout, reasonTag)
+    if not parent then
+        warn(string.format("[AutoPrivateLobby] Missing parent for '%s' (%s).", tostring(childName), tostring(reasonTag)))
+        return nil
+    end
+    local deadline = os.clock() + (timeout or CRITICAL_CHILD_TIMEOUT)
+    local child = parent:FindFirstChild(childName)
+    while not child and os.clock() < deadline do
+        local ok, result = pcall(function()
+            return parent:WaitForChild(childName, 1)
+        end)
+        if ok and result then
+            child = result
+            break
+        end
+    end
+    if not child then
+        warn(string.format("[AutoPrivateLobby] Critical instance '%s' missing under %s (%s).", tostring(childName), parent.Name, tostring(reasonTag)))
+    end
+    return child
+end
+
+local playerReady = false
+
+local function waitForPlayerReady()
+    if playerReady then
+        return
+    end
+
+    local character = LocalPlayer.Character
+    if not character or not character.Parent then
+        local ok, result = pcall(function()
+            return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        end)
+        if ok then
+            character = result
+        end
+    end
+
+    if character then
+        pcall(function()
+            character:WaitForChild("Humanoid", 10)
+        end)
+        pcall(function()
+            character:WaitForChild("HumanoidRootPart", 10)
+        end)
+    end
+
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then
+        local ok, result = pcall(function()
+            return LocalPlayer:WaitForChild("PlayerGui", 10)
+        end)
+        if ok then
+            playerGui = result
+        end
+    end
+
+    if playerGui then
+        pcall(function()
+            playerGui:WaitForChild("ScreenInfo", 10)
+        end)
+
+        local hotbar = playerGui:FindFirstChild("HotBar")
+        local hotbarName = hotbar and "HotBar" or nil
+        if not hotbar then
+            local ok, result = pcall(function()
+                return playerGui:WaitForChild("HotBar", 5)
+            end)
+            if ok and result then
+                hotbar = result
+                hotbarName = "HotBar"
+            end
+        end
+        if not hotbar then
+            hotbar, hotbarName = findFirstChildByNames(playerGui, HOTBAR_NAMES, 10)
+        end
+
+        if hotbar then
+            local infoFrame = nil
+            if hotbar:IsA("GuiObject") then
+                infoFrame = hotbar:FindFirstChild("Info")
+                if not infoFrame then
+                    local ok, result = pcall(function()
+                        return hotbar:WaitForChild("Info", 5)
+                    end)
+                    if ok and result then
+                        infoFrame = result
+                    end
+                end
+                if not infoFrame then
+                    infoFrame = findFirstChildByNames(hotbar, HOTBAR_INFO_NAMES, 10)
+                end
+            end
+
+            if infoFrame and infoFrame:IsA("GuiObject") then
+                if not infoFrame.Visible then
+                    local startTime = os.clock()
+                    while not infoFrame.Visible and os.clock() - startTime < 60 do
+                        local ok = pcall(function()
+                            infoFrame:GetPropertyChangedSignal("Visible"):Wait()
+                        end)
+                        if not ok then
+                            break
+                        end
+                    end
+                end
+
+                if not infoFrame.Visible then
+                    warn("[AutoPrivateLobby] HotBar.Info never became visible; continuing anyway.")
+                end
+            else
+                warn(string.format("[AutoPrivateLobby] %s missing Info child (expected %s); continuing.", hotbarName or "HotBar", table.concat(HOTBAR_INFO_NAMES, "/")))
+            end
+        else
+            warn(string.format("[AutoPrivateLobby] No supported HotBar found (looked for: %s); continuing anyway.", table.concat(HOTBAR_NAMES, "/")))
+        end
+    end
+
+    playerReady = true
+end
+
+local function sanitizeJobId(jobId)
+    if typeof(jobId) ~= "string" then
+        jobId = tostring(jobId or "")
+    end
+
+    jobId = jobId:gsub("%s+", "")
+    if jobId == "" then
+        return nil
+    end
+
+    return jobId
+end
+
+local function getConfiguredTeleportTarget()
+    local configuredJobId = sanitizeJobId(AUTO_TELEPORT_JOB_ID)
+    if not configuredJobId then
+        return nil, nil
+    end
+
+    local configuredPlaceId = TELEPORT_PLACE_ID or game.PlaceId or DEFAULT_LOBBY_PLACE_ID
+    if typeof(configuredPlaceId) ~= "number" then
+        configuredPlaceId = tonumber(configuredPlaceId) or DEFAULT_LOBBY_PLACE_ID
+    end
+
+    return configuredPlaceId, configuredJobId
+end
+
+local function teleportToJobId(jobId, contextLabel, overridePlaceId)
+    local targetPlaceId = overridePlaceId or TELEPORT_PLACE_ID or game.PlaceId
+    if typeof(targetPlaceId) ~= "number" then
+        targetPlaceId = tonumber(targetPlaceId) or DEFAULT_LOBBY_PLACE_ID
+    end
+
+    local trimmed = sanitizeJobId(jobId)
+    if not trimmed then
+        local configuredPlaceId, configuredJobId = getConfiguredTeleportTarget()
+        trimmed = configuredJobId
+        if configuredPlaceId then
+            targetPlaceId = configuredPlaceId
+        end
+    end
+
+    if not trimmed then
+        warn(string.format("[AutoPrivateLobby] No local JobId configured%s; teleport aborted.", contextLabel and (" (" .. contextLabel .. ")") or ""))
+        return false
+    end
+
+    local currentJobId = sanitizeJobId(game.JobId)
+    if currentJobId and currentJobId == trimmed then
+        print("[AutoPrivateLobby] Current server already matches teleport target; skipping teleport.")
+        return false
+    end
+
+    local ok, err = pcall(function()
+        TeleportService:TeleportToPlaceInstance(targetPlaceId, trimmed, LocalPlayer)
+    end)
+
+    if not ok then
+        warn(string.format("[AutoPrivateLobby] Teleport failed%s: %s", contextLabel and (" (" .. contextLabel .. ")") or "", tostring(err)))
+        return false
+    end
+
+    print(string.format("[AutoPrivateLobby] Teleporting to JobId %s (Place %s)", trimmed, tostring(targetPlaceId)))
+    return true
+end
+
+AutoMedalTeleportToJobId = teleportToJobId
+
+do
+    local autoJob = sanitizeJobId(AUTO_TELEPORT_JOB_ID)
+    if game.PlaceId == ARENA_PLACE_ID then
+        print("[AutoPrivateLobby] Arena place detected at startup; skipping auto lobby teleport.")
+    elseif autoJob then
+        teleportToJobId(autoJob, "AutoStart")
+    end
+end
+local function bootstrapArenaModule()
+    print("[AutoPrivateLobby] Bootstrap disabled; no events fired on load.")
+end
+bootstrapArenaModule()
+
+local function startArenaEmptyReturnMonitor()
+    if game.PlaceId ~= ARENA_PLACE_ID then
+        return
+    end
+
+    local teleportScheduled = false
+
+    local function hasOtherPlayers()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function scheduleReturnIfNeeded()
+        if game.PlaceId ~= ARENA_PLACE_ID then
+            teleportScheduled = false
+            return
+        end
+        if teleportScheduled then
+            return
+        end
+        if hasOtherPlayers() then
+            return
+        end
+        teleportScheduled = true
+        task.spawn(function()
+            waitForPlayerReady()
+            task.wait(3)
+            if game.PlaceId ~= ARENA_PLACE_ID then
+                return
+            end
+            local configuredPlaceId, configuredJobId = getConfiguredTeleportTarget()
+            if configuredJobId then
+                teleportToJobId(configuredJobId, "ArenaEmptyReturn", configuredPlaceId)
+            else
+                local fallbackPlace = TELEPORT_PLACE_ID or DEFAULT_LOBBY_PLACE_ID
+                if typeof(fallbackPlace) ~= "number" then
+                    fallbackPlace = tonumber(fallbackPlace) or DEFAULT_LOBBY_PLACE_ID
+                end
+                local ok, err = pcall(function()
+                    TeleportService:Teleport(fallbackPlace, LocalPlayer)
+                end)
+                if not ok then
+                    warn(string.format("[AutoPrivateLobby] Failed to teleport from empty arena: %s", tostring(err)))
+                end
+            end
+        end)
+    end
+
+    scheduleReturnIfNeeded()
+
+    Players.PlayerAdded:Connect(function(player)
+        if game.PlaceId ~= ARENA_PLACE_ID then
+            return
+        end
+        if player ~= LocalPlayer then
+            teleportScheduled = false
+        end
+    end)
+
+    Players.PlayerRemoving:Connect(function(player)
+        if player == LocalPlayer then
+            return
+        end
+        task.defer(scheduleReturnIfNeeded)
+    end)
+end
+
+local function startAutoPrivateLobby()
+    local LOBBY_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
+    local TELEPORT_POSITION = Vector3.new(-224, 15, -798)
+    local MATCH_TELEPORT_POINTS = {
+        Vector3.new(-224, 15, -882);
+        Vector3.new(-222, 15, -971);
+    }
+    local MATCH_TELEPORT_DELAY = 1
+    local AUTO_START_AFTER_INVITES = true
+    local USE_SAME_EQUIPMENT = false
+    local TEAM_NAMES = {"Blue", "Red"}
+    local SWAP_TEAM_ENABLED = false
+    local busyMakingLobby = false
+    local currentTeamName
+
+    local function getHRP()
+        local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        return character:WaitForChild("HumanoidRootPart")
+    end
+
+    local function playTeleportEffect(hrp, position)
+        local humanoid = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
+        if humanoid then
+            humanoid.Jump = true
+            task.wait(0.05)
+        end
+        hrp.CFrame = CFrame.new(position)
+    end
+
+    local function teleportSequence()
+        local ok, err = pcall(function()
+            local hrp = getHRP()
+            local points = #MATCH_TELEPORT_POINTS > 0 and MATCH_TELEPORT_POINTS or {TELEPORT_POSITION}
+            for index, teleportPosition in ipairs(points) do
+                playTeleportEffect(hrp, teleportPosition)
+                if index < #points then
+                    task.wait(MATCH_TELEPORT_DELAY)
+                end
+            end
+        end)
+
+        if not ok then
+            warn(string.format("[AutoPrivateLobby] Failed to run teleport sequence: %s", tostring(err)))
+        end
+    end
+
+    local function ensureLobbyJobConsistency()
+        local configuredPlaceId, configuredJobId = getConfiguredTeleportTarget()
+        local targetJobId = sanitizeJobId(configuredJobId)
+        local currentJobId = sanitizeJobId(game.JobId)
+
+        if targetJobId and currentJobId and targetJobId ~= currentJobId then
+            local teleported = teleportToJobId(targetJobId, "LobbyJobMismatch", configuredPlaceId)
+            if not teleported then
+                warn("[AutoPrivateLobby] Lobby job mismatch detected but teleport could not be triggered.")
+            end
+            return false
+        end
+
+        return true
+    end
+
+local function runNonLobbyFlow()
+    task.spawn(function()
+        if not game:IsLoaded() then
+            game.Loaded:Wait()
+        end
+
+            local character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+            if not character then
+                return
+            end
+
+            local okHumanoid, humanoid = pcall(function()
+                return character:WaitForChild("Humanoid", 5)
+            end)
+            local okHrp, hrp = pcall(function()
+                return character:WaitForChild("HumanoidRootPart", 5)
+            end)
+            if not okHumanoid or not humanoid or not okHrp or not hrp then
+                return
+            end
+
+            task.wait(4)
+
+            local function ensureEquipped()
+                local equipHandler = AutoMedalForceWeaponEquip
+                if equipHandler then
+                    equipHandler()
+                    return
+                end
+                local okEquip, errEquip = pcall(function()
+                    local events = waitForChildCritical(ReplicatedStorage, "Events", 8, "ArenaEquipEvents")
+                    if not events then
+                        return
+                    end
+                    local fallbackWeaponsEvent = waitForChildCritical(events, "WeaponsEvent", 8, "ArenaWeaponsEventMissing")
+                    if not fallbackWeaponsEvent then
+                        return
+                    end
+                    fallbackWeaponsEvent:FireServer("Equip/UnEquip")
+                end)
+                if not okEquip then
+                    warn(string.format("[AutoPrivateLobby] Failed to trigger fallback equip: %s", tostring(errEquip)))
+                end
+            end
+
+            ensureEquipped()
+
+            local auraHandler = AutoMedalForceAuraEnable
+            if auraHandler then
+                auraHandler()
+            end
+
+            teleportSequence()
+
+            local okReturn, errReturn = pcall(function()
+                local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+                if not playerGui then
+                    return
+                end
+                local screenInfo = playerGui:FindFirstChild("ScreenInfo") or playerGui:WaitForChild("ScreenInfo", 5)
+                if not screenInfo then
+                    return
+                end
+                local arenaResultGui = screenInfo:FindFirstChild("ArenaResultTEST") or screenInfo:WaitForChild("ArenaResultTEST", 5)
+                if not arenaResultGui then
+                    return
+                end
+
+                local function waitForVisibility(targetState, timeout)
+                    local deadline = os.clock() + timeout
+                    while os.clock() < deadline do
+                        if arenaResultGui.Visible == targetState then
+                            return true
+                        end
+                        task.wait(0.25)
+                    end
+                    return false
+                end
+
+                if arenaResultGui.Visible then
+                    local cleared = waitForVisibility(false, 60)
+                    if not cleared then
+                        warn("[AutoPrivateLobby] Arena result UI never hid; skipping auto return.")
+                        return
+                    end
+                end
+
+                local shown = waitForVisibility(true, 180)
+                if not shown then
+                    warn("[AutoPrivateLobby] Arena result UI never appeared; skipping auto return.")
+                    return
+                end
+
+                task.wait(1)
+                local events = waitForChildCritical(ReplicatedStorage, "Events", 8, "ArenaReturnEvents")
+                local returnEvent = events and waitForChildCritical(events, "ArenaReturnToLobby", 8, "ArenaReturnMissing")
+                if returnEvent then
+                    returnEvent:FireServer()
+                    print("[AutoPrivateLobby] Arena result detected; returning to lobby.")
+                end
+            end)
+
+            if not okReturn then
+                warn(string.format("[AutoPrivateLobby] Failed to trigger ArenaReturnToLobby after arena sequence: %s", tostring(errReturn)))
+            end
+        end)
+
+        warn(string.format("[AutoPrivateLobby] Non-lobby place detected (%s). Combat prep flow triggered.", tostring(game.PlaceId)))
+    end
+    
+    print("[AutoPrivateLobby] Lobby detected; starting automated private lobby sequence.")
+    if game.PlaceId == ARENA_PLACE_ID then
+	task.wait(nonpvpwait)
+        runNonLobbyFlow()
+        return
+    end
+
+    if game.PlaceId ~= LOBBY_PLACE_ID then
+        warn(string.format("[AutoPrivateLobby] Unexpected place (%s); redirecting to configured job.", tostring(game.PlaceId)))
+        teleportToJobId(nil, "NonArenaRedirect")
+        return
+    end
+    if not ensureLobbyJobConsistency() then
+        return
+    end
+    task.wait(lobbywaits)
+    local eventsFolder = waitForChildCritical(ReplicatedStorage, "Events", 10, "LobbyEventsMissing")
+    if not eventsFolder then
+        return
+    end
+    local createGroupEvent = waitForChildCritical(eventsFolder, "CreateArenaGroup", 10, "LobbyCreateGroupMissing")
+    local changeSettingEvent = waitForChildCritical(eventsFolder, "ArenaGroupChangeSetting", 10, "LobbyChangeSettingMissing")
+    local inviteEvent = waitForChildCritical(eventsFolder, "SendInvitePlayerToArenaGroup", 10, "LobbyInviteMissing")
+    local swapTeamEvent = waitForChildCritical(eventsFolder, "SwapArenaTeam", 10, "LobbySwapMissing")
+    local startArenaEvent = waitForChildCritical(eventsFolder, "StartArenaGroup", 10, "LobbyStartMissing")
+    if not (createGroupEvent and changeSettingEvent and inviteEvent and swapTeamEvent and startArenaEvent) then
+        return
+    end
+    local playerGui = waitForChildCritical(LocalPlayer, "PlayerGui", 10, "PlayerGuiMissing")
+    if not playerGui then
+        return
+    end
+
+    local function getArenaGroupContainer()
+        local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 5)
+        if not gui then
+            return nil
+        end
+
+        local interactionZones = gui:FindFirstChild("InteractionZones")
+        if not interactionZones then
+            return nil
+        end
+
+        local arenaGroup = interactionZones:FindFirstChild("ArenaGroup")
+        if not arenaGroup then
+            return nil
+        end
+
+        return arenaGroup:FindFirstChild("Group")
+    end
+
+    local function detectCurrentTeam()
+        local groupFolder = getArenaGroupContainer()
+        if not groupFolder then
+            return nil
+        end
+
+        for _, teamName in ipairs(TEAM_NAMES) do
+            local teamFrame = groupFolder:FindFirstChild(teamName)
+            if teamFrame then
+                local found = teamFrame:FindFirstChild(LocalPlayer.Name, true)
+                if found then
+                    return teamName
+                end
+            end
+        end
+
+        return nil
+    end
+
+    local function getTeamMembers(teamName)
+        local groupFolder = getArenaGroupContainer()
+        if not groupFolder then
+            return nil
+        end
+
+        local teamFrame = groupFolder:FindFirstChild(teamName)
+        if not teamFrame then
+            return nil
+        end
+
+        local added = {}
+        local members = {}
+
+        for _, desc in ipairs(teamFrame:GetDescendants()) do
+            local teammate = Players:FindFirstChild(desc.Name)
+            if teammate and not added[teammate] then
+                table.insert(members, teammate)
+                added[teammate] = true
+            end
+        end
+
+        return members
+    end
+
+    local function findEnemyPlayerInGroup()
+        local groupFolder = getArenaGroupContainer()
+        if not groupFolder then
+            return nil, nil
+        end
+
+        for _, teamName in ipairs(TEAM_NAMES) do
+            local members = getTeamMembers(teamName)
+            if members then
+                for _, player in ipairs(members) do
+                    if player ~= LocalPlayer and not TARGET_PLAYER_SET[player.Name] then
+                        return player, teamName
+                    end
+                end
+            end
+        end
+
+        return nil, nil
+    end
+
+    local function swapPlayerToOppositeTeam(targetPlayer)
+        if not targetPlayer or targetPlayer == LocalPlayer then
+            return
+        end
+
+        local ok, err = pcall(function()
+            swapTeamEvent:FireServer(targetPlayer.UserId)
+        end)
+
+        if not ok then
+            warn(string.format("[AutoPrivateLobby] Failed to swap %s: %s", targetPlayer.Name, tostring(err)))
+        end
+    end
+
+    local function ensureSoloTeam()
+        if not currentTeamName or not SWAP_TEAM_ENABLED then
+            return
+        end
+
+        local teammates = getTeamMembers(currentTeamName)
+        if not teammates then
+            return
+        end
+
+        for _, teammate in ipairs(teammates) do
+            if teammate ~= LocalPlayer then
+                swapPlayerToOppositeTeam(teammate)
+                task.wait(0.1)
+            end
+        end
+    end
+
+    local function updateTeamIfNeeded()
+        local detectedTeam = detectCurrentTeam()
+        if detectedTeam and detectedTeam ~= currentTeamName then
+            currentTeamName = detectedTeam
+            print(string.format("[AutoPrivateLobby] Detected team: %s", currentTeamName))
+            ensureSoloTeam()
+        elseif detectedTeam and detectedTeam == currentTeamName then
+            ensureSoloTeam()
+        end
+    end
+
+    local function monitorEnemyPresence()
+        task.spawn(function()
+            local lastEnemyName
+            while true do
+                local enemyPlayer, teamName = findEnemyPlayerInGroup()
+                if enemyPlayer then
+                    if enemyPlayer.Name ~= lastEnemyName then
+                        print(string.format("[AutoPrivateLobby] Enemy %s joined arena group on %s team.", enemyPlayer.Name, tostring(teamName)))
+                        lastEnemyName = enemyPlayer.Name
+                    end
+                elseif lastEnemyName then
+                    print(string.format("[AutoPrivateLobby] Enemy %s left the arena group.", lastEnemyName))
+                    lastEnemyName = nil
+                end
+                task.wait(ENEMY_CHECK_INTERVAL)
+            end
+        end)
+    end
+
+    task.spawn(function()
+        while true do
+            updateTeamIfNeeded()
+            task.wait(1)
+        end
+    end)
+    monitorEnemyPresence()
+
+    playerGui.ChildAdded:Connect(function(child)
+        if child.Name == "InteractionZones" then
+            updateTeamIfNeeded()
+        end
+    end)
+
+    playerGui.DescendantAdded:Connect(function(descendant)
+        if descendant.Name == LocalPlayer.Name then
+            updateTeamIfNeeded()
+        end
+    end)
+
+    local function startArenaAfterInvites()
+        if not AUTO_START_AFTER_INVITES then
+            return
+        end
+
+        local ok, err = pcall(function()
+            startArenaEvent:FireServer(USE_SAME_EQUIPMENT)
+        end)
+
+        if not ok then
+            warn(string.format("[AutoPrivateLobby] Failed to start arena automatically: %s", tostring(err)))
+        else
+            print("[AutoPrivateLobby] Auto-started arena after inviting players.")
+        end
+    end
+
+    local function invitePlayers()
+        for _, targetName in ipairs(TARGET_PLAYER_NAMES) do
+            local targetPlayer = Players:FindFirstChild(targetName)
+            if not targetPlayer then
+                local ok, found = pcall(function()
+                    return Players:WaitForChild(targetName, 5)
+                end)
+                if ok then
+                    targetPlayer = found
+                end
+            end
+
+            if not targetPlayer then
+                warn(string.format("[AutoPrivateLobby] Could not find player '%s' to invite.", targetName))
+            else
+                local ok, err = pcall(function()
+                    inviteEvent:InvokeServer(targetPlayer)
+                end)
+
+                if not ok then
+                    warn(string.format("[AutoPrivateLobby] Failed to invite %s: %s", targetPlayer.Name, tostring(err)))
+                end
+                task.wait(0.5)
+            end
+        end
+
+        task.wait(2.5)
+        startArenaAfterInvites()
+    end
+
+    local function makeLobbyPrivate()
+        if busyMakingLobby then
+            return
+        end
+
+        busyMakingLobby = true
+
+        local ok, err = pcall(function()
+            createGroupEvent:FireServer()
+            task.wait(0.5)
+
+            for _, setting in ipairs(SETTINGS_SEQUENCE) do
+                changeSettingEvent:FireServer(setting)
+                task.wait(0.8)
+            end
+
+            invitePlayers()
+        end)
+
+        if not ok then
+            warn("[AutoPrivateLobby] Failed to apply settings:", err)
+        end
+
+        busyMakingLobby = false
+    end
+
+    makeLobbyPrivate()
+
+    task.spawn(function()
+        while true do
+            if not busyMakingLobby then
+                local hasTeam = detectCurrentTeam()
+                if not hasTeam then
+                    print("[AutoPrivateLobby] No arena group detected; rebuilding lobby.")
+                    makeLobbyPrivate()
+                end
+            end
+            task.wait(8)
+        end
+    end)
+
+    LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(1)
+        makeLobbyPrivate()
+    end)
+end
+
+local function startAlmostAura()
+    local EventsFolder = waitForChildCritical(ReplicatedStorage, "Events", 10, "AuraEventsMissing")
+    local ModelsFolder = waitForChildCritical(ReplicatedStorage, "Models", 10, "AuraModelsMissing")
+    if not (EventsFolder and ModelsFolder) then
+        return
+    end
+    local ClientHitbox = waitForChildCritical(ModelsFolder, "ClientAroundHitbox", 10, "AuraClientHitboxMissing")
+    local WeaponsEvent = waitForChildCritical(EventsFolder, "WeaponsEvent", 10, "AuraWeaponsEventMissing")
+    local AttackEvent = waitForChildCritical(EventsFolder, "AttackV2", 10, "AuraAttackMissing")
+    local VFXEvent = waitForChildCritical(EventsFolder, "VFX_Client", 10, "AuraVFXMissing")
+    if not (ClientHitbox and WeaponsEvent and AttackEvent and VFXEvent) then
+        return
+    end
+
+    local lastEquipTime = 0
+    local equipInProgress = false
+    local EQUIP_COOLDOWN = 1.5
+
+    local function fireWeaponEquip()
+        local now = os.clock()
+        if equipInProgress then
+            return true
+        end
+        if now - lastEquipTime < EQUIP_COOLDOWN then
+            return true
+        end
+        equipInProgress = true
+        local ok, err = pcall(function()
+            WeaponsEvent:FireServer("Equip/UnEquip")
+        end)
+        equipInProgress = false
+        if ok then
+            lastEquipTime = now
+        else
+            warn(string.format("[AuraKill] Failed to prep weapon equip: %s", tostring(err)))
+        end
+        return ok
+    end
+
+    local AURA_RANGE = 150
+    local AURA_INTERVAL = 0.02
+    local MAX_COMBO_STAGE = 3
+    local ATTACK_ATTR_TIMEOUT = 0.15
+
+    local auraEnabled = false
+    local comboStage = 0
+    local nextPulseTime = 0
+    local heartbeatConnection = nil
+
+    local Character = nil
+    local HumanoidRootPart = nil
+    local auraContainer = nil
+    local DEFAULT_DIRECTION = "0:0:-1"
+    local attackingStateCount = 0
+    local TARGET_PART_NAMES = {
+        CharHitbox = true;
+        CharHitBox = true;
+    }
+
+    local function setCharacter(char)
+        Character = char
+        HumanoidRootPart = nil
+        attackingStateCount = 0
+        if not Character then
+            return
+        end
+        task.spawn(function()
+            HumanoidRootPart = Character:WaitForChild("HumanoidRootPart", 5)
+        end)
+    end
+
+    if LocalPlayer.Character then
+        setCharacter(LocalPlayer.Character)
+    end
+    LocalPlayer.CharacterAdded:Connect(setCharacter)
+
+    local function canAttack()
+        if not Character or not Character.Parent then
+            return false
+        end
+        if Character:GetAttribute("Stunned") then
+            return false
+        end
+        if not Character:GetAttribute("IsEquipped") then
+            return false
+        end
+        if Character:GetAttribute("IsDashing") or Character:GetAttribute("IsEquipping") or Character:GetAttribute("IsCrawling") then
+            return false
+        end
+        if not HumanoidRootPart or not HumanoidRootPart.Parent then
+            return false
+        end
+        return true
+    end
+
+    local function buildPayload(target)
+        local id = target:GetAttribute("ID")
+        if id then
+            return {id}
+        end
+        return target
+    end
+
+    local function beginAttackingState()
+        if not Character then
+            return
+        end
+        attackingStateCount = attackingStateCount + 1
+        Character:SetAttribute("Attacking", true)
+    end
+
+    local function endAttackingState()
+        if not Character then
+            attackingStateCount = 0
+            return
+        end
+        if attackingStateCount > 0 then
+            attackingStateCount = attackingStateCount - 1
+        end
+        if attackingStateCount <= 0 then
+            attackingStateCount = 0
+            Character:SetAttribute("Attacking", false)
+        end
+    end
+
+    local function compressVector(vec)
+        return string.format("%.2f:%.2f:%.2f", vec.X, vec.Y, vec.Z)
+    end
+
+    local PRIORITY_TARGET_PARTS = {"HumanoidRootPart", "CharHitbox", "CharHitBox"}
+
+    local function getTargetPosition(target)
+        if not target then
+            return nil
+        end
+        if target:IsA("BasePart") then
+            return target.Position
+        end
+        for _, partName in ipairs(PRIORITY_TARGET_PARTS) do
+            local part = target:FindFirstChild(partName, true)
+            if part and part:IsA("BasePart") then
+                return part.Position
+            end
+        end
+        local primary = target.PrimaryPart
+        if primary then
+            return primary.Position
+        end
+        if target:IsA("Model") then
+            local success, pivot = pcall(function()
+                return target:GetPivot()
+            end)
+            if success and pivot then
+                return pivot.Position
+            end
+            local anyPart = target:FindFirstChildWhichIsA("BasePart", true)
+            if anyPart then
+                return anyPart.Position
+            end
+        end
+        return nil
+    end
+
+    local function nextComboStage()
+        comboStage = comboStage + 1
+        if comboStage > MAX_COMBO_STAGE then
+            comboStage = 1
+        end
+        return comboStage
+    end
+
+    local function getDirectionString(target)
+        local base = nil
+        if HumanoidRootPart then
+            base = HumanoidRootPart.CFrame.LookVector
+            if target then
+                local targetPosition = getTargetPosition(target)
+                if targetPosition then
+                    local offset = targetPosition - HumanoidRootPart.Position
+                    if offset.Magnitude > 0.01 then
+                        base = offset.Unit
+                    end
+                end
+            end
+        end
+        if not base then
+            return DEFAULT_DIRECTION
+        end
+        return compressVector(base)
+    end
+
+    local function attackTarget(target)
+        local stage = nextComboStage()
+        local payload = buildPayload(target)
+        local directionString = getDirectionString(target)
+        beginAttackingState()
+        AttackEvent:FireServer(1, stage)
+        local directionArgs = {4, stage}
+        directionArgs[4] = directionString
+        AttackEvent:FireServer(table.unpack(directionArgs))
+        AttackEvent:FireServer(5, stage, payload)
+        if Character and Character:GetAttribute("Subclass") == "Assassin" and stage == MAX_COMBO_STAGE then
+            AttackEvent:FireServer(5, stage, payload)
+        end
+        AttackEvent:FireServer(3, stage)
+        VFXEvent:Fire("BL", target)
+        VFXEvent:Fire("H", target)
+        task.delay(ATTACK_ATTR_TIMEOUT, endAttackingState)
+    end
+
+    local function getAuraContainer()
+        if auraContainer and auraContainer.Parent then
+            return auraContainer
+        end
+        auraContainer = workspace:FindFirstChild("IgnoreRaycast") or workspace
+        return auraContainer
+    end
+
+    local function findTargetFromPart(part)
+        local current = part
+        while current do
+            if current == Character then
+                return nil
+            end
+            if current:IsA("BasePart") and TARGET_PART_NAMES[current.Name] and current.Parent then
+                local owner = current.Parent
+                if owner ~= Character and owner:GetAttribute("Team") then
+                    return owner
+                end
+            end
+            if current:IsA("Model") and current:GetAttribute("Team") then
+                return current
+            end
+            current = current.Parent
+        end
+        return nil
+    end
+
+    local function auraSweep()
+        if not canAttack() then
+            return
+        end
+        local container = getAuraContainer()
+        local hitbox = ClientHitbox:Clone()
+        local forwardOffset = CFrame.new(0, 0, -(hitbox.Size.Z / 2) + 2)
+        hitbox.Size = Vector3.new(AURA_RANGE, hitbox.Size.Y, AURA_RANGE)
+        hitbox.CFrame = HumanoidRootPart.CFrame * forwardOffset
+        hitbox.Parent = container
+        Debris:AddItem(hitbox, 0.15)
+        local hits = workspace:GetPartsInPart(hitbox)
+        if not hits then
+            return
+        end
+        local processed = {}
+        local myTeam = Character:GetAttribute("Team")
+        for _, part in ipairs(hits) do
+            if Character and not part:IsDescendantOf(Character) then
+                local target = findTargetFromPart(part)
+                if target and not processed[target] then
+                    processed[target] = true
+                    if not target:GetAttribute("IsImmune") and not target:GetAttribute("IsDied") then
+                        local targetTeam = target:GetAttribute("Team")
+                        if myTeam and targetTeam and myTeam ~= targetTeam then
+                            local humanoid = target:FindFirstChildOfClass("Humanoid")
+                            if humanoid and humanoid.Health > 0 then
+                                attackTarget(target)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local function toggleAura(state)
+        if auraEnabled == state then
+            return
+        end
+        auraEnabled = state
+        if auraEnabled then
+            -- fireWeaponEquip()
+            nextPulseTime = 0
+            heartbeatConnection = RunService.Heartbeat:Connect(function()
+                local now = os.clock()
+                if nextPulseTime <= now then
+                    nextPulseTime = now + AURA_INTERVAL
+                    auraSweep()
+                end
+            end)
+        elseif heartbeatConnection then
+            heartbeatConnection:Disconnect()
+            heartbeatConnection = nil
+        end
+        print(string.format("[AuraKill] %s", auraEnabled and "enabled" or "disabled"))
+    end
+
+    local autoAuraTaskId = 0
+
+    local function scheduleAutoAuraEnable()
+        autoAuraTaskId += 1
+        local thisTaskId = autoAuraTaskId
+
+        task.spawn(function()
+            if not game:IsLoaded() then
+                game.Loaded:Wait()
+            end
+
+            local currentCharacter = Character
+            if not currentCharacter then
+                local ok, char = pcall(function()
+                    return LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+                end)
+                if ok then
+                    currentCharacter = char
+                end
+            end
+
+            if not currentCharacter then
+                return
+            end
+
+            local humanoid = currentCharacter:FindFirstChildOfClass("Humanoid") or currentCharacter:WaitForChild("Humanoid", 5)
+            local hrp = currentCharacter:FindFirstChild("HumanoidRootPart") or currentCharacter:WaitForChild("HumanoidRootPart", 5)
+            if not humanoid or not hrp then
+                return
+            end
+
+            task.wait(4)
+
+            if thisTaskId ~= autoAuraTaskId then
+                return
+            end
+
+            toggleAura(true)
+        end)
+    end
+
+    if game.PlaceId == ARENA_PLACE_ID then
+        scheduleAutoAuraEnable()
+        LocalPlayer.CharacterAdded:Connect(function()
+            scheduleAutoAuraEnable()
+        end)
+    else
+        print("[AuraKill] Lobby detected; auto aura/equip skipped.")
+    end
+
+    AutoMedalForceWeaponEquip = fireWeaponEquip
+    AutoMedalForceAuraEnable = function()
+        toggleAura(true)
+    end
+
+end
+
+waitForPlayerReady()
+startArenaEmptyReturnMonitor()
+startAlmostAura()
+startAutoPrivateLobby()
