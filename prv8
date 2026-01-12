@@ -12,7 +12,7 @@ local ARENA_PLACE_ID = 136994634055993
 local TELEPORT_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
 local AUTO_TELEPORT_JOB_ID = "8e81153d-971c-4d1b-91ae-263904241b28" -- set to your desired JobId when you want automatic teleports
 local nonpvpwait = 4
-local lobbywaits = 35
+local lobbywaits = 10
 local SETTINGS_SEQUENCE = {"Private", "Map"}
 local TARGET_PLAYER_NAMES = {"navulettutan52"}
 local TARGET_PLAYER_SET = {}
@@ -398,6 +398,39 @@ local function startAutoPrivateLobby()
         end
     end
 
+    local function findActiveTargetPlayer()
+        for _, targetName in ipairs(TARGET_PLAYER_NAMES) do
+            local player = Players:FindFirstChild(targetName)
+            if player then
+                return player
+            end
+        end
+        return nil
+    end
+
+    local function waitForTargetPlayerPresence()
+        if #TARGET_PLAYER_NAMES == 0 then
+            return nil
+        end
+
+        local existing = findActiveTargetPlayer()
+        if existing then
+            return existing
+        end
+
+        print(string.format("[AutoPrivateLobby] Waiting for target players (%s) to join before configuring lobby.", table.concat(TARGET_PLAYER_NAMES, ", ")))
+
+        local targetPlayer = nil
+        while not targetPlayer do
+            local player = Players.PlayerAdded:Wait()
+            if TARGET_PLAYER_SET[player.Name] then
+                targetPlayer = player
+            end
+        end
+
+        return targetPlayer
+    end
+
     local function ensureLobbyJobConsistency()
         local configuredPlaceId, configuredJobId = getConfiguredTeleportTarget()
         local targetJobId = sanitizeJobId(configuredJobId)
@@ -538,6 +571,10 @@ local function runNonLobbyFlow()
     end
     if not ensureLobbyJobConsistency() then
         return
+    end
+    local detectedTarget = waitForTargetPlayerPresence()
+    if detectedTarget then
+        print(string.format("[AutoPrivateLobby] Target player %s detected; continuing in %d seconds.", detectedTarget.Name, lobbywaits))
     end
     task.wait(lobbywaits)
     local eventsFolder = waitForChildCritical(ReplicatedStorage, "Events", 10, "LobbyEventsMissing")
