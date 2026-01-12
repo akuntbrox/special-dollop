@@ -5,13 +5,14 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 local TeleportService = game:GetService("TeleportService")
+local UserInputService = game:GetService("UserInputService")
 
 local DEFAULT_LOBBY_PLACE_ID = 80620565999570
 local ARENA_PLACE_ID = 136994634055993
 local TELEPORT_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
 local AUTO_TELEPORT_JOB_ID = "6203de89-1816-4cd4-81f6-ddb1cbc44871" -- set to your desired JobId when you want automatic teleports
-local nonpvpwait = 2
-local lobbywaits = 26
+local nonpvpwait = 4
+local lobbywaits = 18
 local SETTINGS_SEQUENCE = {"Private", "Map"}
 local TARGET_PLAYER_NAMES = {"navulettutan52"}
 local TARGET_PLAYER_SET = {}
@@ -22,6 +23,10 @@ local ENEMY_CHECK_INTERVAL = 3
 local CRITICAL_CHILD_TIMEOUT = 12
 local HOTBAR_NAMES = {"HotBar", "MobileHotBar", "TouchHotBar"}
 local HOTBAR_INFO_NAMES = {"Info", "InfoMobile", "MobileInfo", "TouchInfo"}
+local IS_TOUCH_CLIENT = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local ARENA_EMPTY_DESKTOP_DELAY = 3
+local ARENA_EMPTY_TOUCH_DELAY = 12 -- phones need extra time before deciding arena is empty
+local ARENA_EMPTY_RECHECK_INTERVAL = 1
 
 local function findFirstChildByNames(parent, names, waitTime)
     if not parent then
@@ -265,6 +270,7 @@ local function startArenaEmptyReturnMonitor()
     end
 
     local teleportScheduled = false
+    local ARENA_EMPTY_CONFIRMATION_DELAY = IS_TOUCH_CLIENT and ARENA_EMPTY_TOUCH_DELAY or ARENA_EMPTY_DESKTOP_DELAY
 
     local function hasOtherPlayers()
         for _, player in ipairs(Players:GetPlayers()) do
@@ -273,6 +279,22 @@ local function startArenaEmptyReturnMonitor()
             end
         end
         return false
+    end
+
+    local function confirmArenaStillEmpty()
+        if game.PlaceId ~= ARENA_PLACE_ID then
+            return false
+        end
+        local startTime = os.clock()
+        while os.clock() - startTime < ARENA_EMPTY_CONFIRMATION_DELAY do
+            if hasOtherPlayers() or game.PlaceId ~= ARENA_PLACE_ID then
+                return false
+            end
+            local elapsed = os.clock() - startTime
+            local remaining = ARENA_EMPTY_CONFIRMATION_DELAY - elapsed
+            task.wait(math.min(ARENA_EMPTY_RECHECK_INTERVAL, math.max(remaining, 0.1)))
+        end
+        return game.PlaceId == ARENA_PLACE_ID and not hasOtherPlayers()
     end
 
     local function scheduleReturnIfNeeded()
@@ -289,8 +311,8 @@ local function startArenaEmptyReturnMonitor()
         teleportScheduled = true
         task.spawn(function()
             waitForPlayerReady()
-            task.wait(3)
-            if game.PlaceId ~= ARENA_PLACE_ID then
+            if not confirmArenaStillEmpty() then
+                teleportScheduled = false
                 return
             end
             local configuredPlaceId, configuredJobId = getConfiguredTeleportTarget()
@@ -759,7 +781,7 @@ local function runNonLobbyFlow()
 
             for _, setting in ipairs(SETTINGS_SEQUENCE) do
                 changeSettingEvent:FireServer(setting)
-                task.wait(0.8)
+                task.wait(0.4)
             end
 
             invitePlayers()
