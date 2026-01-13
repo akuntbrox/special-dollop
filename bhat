@@ -5,11 +5,17 @@ local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
 local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
 
 local DEFAULT_LOBBY_PLACE_ID = 80620565999570
 local ARENA_PLACE_ID = 136994634055993
 local TELEPORT_PLACE_ID = DEFAULT_LOBBY_PLACE_ID
-local AUTO_TELEPORT_JOB_ID = "639b7c98-30b6-4227-94da-d07b522075f9" -- set to your desired JobId when you want automatic teleports
+local AUTO_TELEPORT_JOB_URL = "https://raw.githubusercontent.com/akuntbrox/special-dollop/refs/heads/main/jobId" -- optional remote endpoint that responds with a JobId or JSON {jobId, placeId}
+local REMOTE_JOB_CACHE_SECONDS = 15
+local REMOTE_JOB_FAILURE_BACKOFF = 5
+local nonpvpwait = 4
+local lobbywaits = 10
 local SETTINGS_SEQUENCE = {"Private", "Map"}
 local TARGET_PLAYER_NAMES = {"roblox_user_9544929123"}
 local TARGET_PLAYER_SET = {}
@@ -20,6 +26,10 @@ local ENEMY_CHECK_INTERVAL = 3
 local CRITICAL_CHILD_TIMEOUT = 12
 local HOTBAR_NAMES = {"HotBar", "MobileHotBar", "TouchHotBar"}
 local HOTBAR_INFO_NAMES = {"Info", "InfoMobile", "MobileInfo", "TouchInfo"}
+local IS_TOUCH_CLIENT = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+local ARENA_EMPTY_DESKTOP_DELAY = 3
+local ARENA_EMPTY_TOUCH_DELAY = 12 -- phones need extra time before deciding arena is empty
+local ARENA_EMPTY_RECHECK_INTERVAL = 1
 
 local function findFirstChildByNames(parent, names, waitTime)
     if not parent then
@@ -189,13 +199,116 @@ local function sanitizeJobId(jobId)
     return jobId
 end
 
+local remoteJobTargetCache = {
+    expiresAt = 0,
+    placeId = nil,
+    jobId = nil,
+}
+
+local function normalizeRemotePlaceId(value)
+    if value == nil then
+        return nil
+    end
+    if typeof(value) == "number" then
+        return value
+    end
+    if typeof(value) == "string" then
+        local numeric = tonumber(value)
+        if numeric then
+            return numeric
+        end
+    end
+    return nil
+end
+
+local function parseRemoteJobTarget(rawBody)
+    if typeof(rawBody) ~= "string" then
+        rawBody = tostring(rawBody or "")
+    end
+    local trimmed = rawBody:match("^%s*(.-)%s*$") or ""
+    if trimmed == "" then
+        return nil, nil
+    end
+
+    local uriPlace = nil
+    local uriJob = nil
+
+    if trimmed:sub(1, 9):lower() == "roblox://" then
+        uriPlace = normalizeRemotePlaceId(trimmed:match("placeId=(%d+)"))
+        uriJob = sanitizeJobId(trimmed:match("gameInstanceId=([%w%-]+)"))
+        if uriJob then
+            return uriPlace, uriJob
+        end
+    end
+
+    local sanitized = sanitizeJobId(trimmed)
+
+    local firstChar = trimmed:sub(1, 1)
+    if firstChar == "{" or firstChar == "[" or firstChar == "\"" then
+        local ok, decoded = pcall(function()
+            return HttpService:JSONDecode(trimmed)
+        end)
+        if ok then
+            if typeof(decoded) == "table" then
+                local jobCandidate = decoded.jobId or decoded.JobId or decoded.job_id or decoded.jobID or decoded.job
+                local placeCandidate = decoded.placeId or decoded.PlaceId or decoded.place_id or decoded.placeID or decoded.place
+                if not jobCandidate and typeof(decoded[1]) == "string" then
+                    jobCandidate = decoded[1]
+                end
+                sanitized = sanitizeJobId(jobCandidate) or sanitized
+                return normalizeRemotePlaceId(placeCandidate), sanitized
+            elseif typeof(decoded) == "string" then
+                sanitized = sanitizeJobId(decoded) or sanitized
+                return nil, sanitized
+            end
+        end
+    end
+
+    return nil, sanitized
+end
+
+local function getRemoteJobTarget(forceRefresh)
+    if AUTO_TELEPORT_JOB_URL == nil or AUTO_TELEPORT_JOB_URL == "" then
+        return nil, nil
+    end
+
+    local now = os.clock()
+    if not forceRefresh and now < remoteJobTargetCache.expiresAt then
+        return remoteJobTargetCache.placeId, remoteJobTargetCache.jobId
+    end
+
+    local ok, response = pcall(function()
+        return game:HttpGet(AUTO_TELEPORT_JOB_URL, true)
+    end)
+
+    if not ok then
+        warn(string.format("[AutoPrivateLobby] Failed to fetch remote JobId: %s", tostring(response)))
+        remoteJobTargetCache.expiresAt = now + REMOTE_JOB_FAILURE_BACKOFF
+        remoteJobTargetCache.placeId = nil
+        remoteJobTargetCache.jobId = nil
+        return nil, nil
+    end
+
+    local remotePlaceId, remoteJobId = parseRemoteJobTarget(response)
+    remoteJobTargetCache.placeId = remotePlaceId
+    remoteJobTargetCache.jobId = remoteJobId
+    remoteJobTargetCache.expiresAt = now + ((remoteJobId and REMOTE_JOB_CACHE_SECONDS) or REMOTE_JOB_FAILURE_BACKOFF)
+
+    if not remoteJobId then
+        warn(string.format("[AutoPrivateLobby] Remote JobId endpoint %s returned no usable JobId.", AUTO_TELEPORT_JOB_URL))
+    end
+
+    return remoteJobTargetCache.placeId, remoteJobTargetCache.jobId
+end
+
 local function getConfiguredTeleportTarget()
-    local configuredJobId = sanitizeJobId(AUTO_TELEPORT_JOB_ID)
+    local remotePlaceId, remoteJobId = getRemoteJobTarget()
+    local configuredJobId = sanitizeJobId(remoteJobId)
     if not configuredJobId then
         return nil, nil
     end
 
-    local configuredPlaceId = TELEPORT_PLACE_ID or game.PlaceId or DEFAULT_LOBBY_PLACE_ID
+    local configuredPlaceId = remotePlaceId or TELEPORT_PLACE_ID or game.PlaceId or DEFAULT_LOBBY_PLACE_ID
     if typeof(configuredPlaceId) ~= "number" then
         configuredPlaceId = tonumber(configuredPlaceId) or DEFAULT_LOBBY_PLACE_ID
     end
@@ -245,11 +358,11 @@ end
 AutoMedalTeleportToJobId = teleportToJobId
 
 do
-    local autoJob = sanitizeJobId(AUTO_TELEPORT_JOB_ID)
+    local autoPlaceId, autoJobId = getConfiguredTeleportTarget()
     if game.PlaceId == ARENA_PLACE_ID then
         print("[AutoPrivateLobby] Arena place detected at startup; skipping auto lobby teleport.")
-    elseif autoJob then
-        teleportToJobId(autoJob, "AutoStart")
+    elseif autoJobId then
+        teleportToJobId(autoJobId, "AutoStart", autoPlaceId)
     end
 end
 local function bootstrapArenaModule()
@@ -263,6 +376,7 @@ local function startArenaEmptyReturnMonitor()
     end
 
     local teleportScheduled = false
+    local ARENA_EMPTY_CONFIRMATION_DELAY = IS_TOUCH_CLIENT and ARENA_EMPTY_TOUCH_DELAY or ARENA_EMPTY_DESKTOP_DELAY
 
     local function hasOtherPlayers()
         for _, player in ipairs(Players:GetPlayers()) do
@@ -271,6 +385,22 @@ local function startArenaEmptyReturnMonitor()
             end
         end
         return false
+    end
+
+    local function confirmArenaStillEmpty()
+        if game.PlaceId ~= ARENA_PLACE_ID then
+            return false
+        end
+        local startTime = os.clock()
+        while os.clock() - startTime < ARENA_EMPTY_CONFIRMATION_DELAY do
+            if hasOtherPlayers() or game.PlaceId ~= ARENA_PLACE_ID then
+                return false
+            end
+            local elapsed = os.clock() - startTime
+            local remaining = ARENA_EMPTY_CONFIRMATION_DELAY - elapsed
+            task.wait(math.min(ARENA_EMPTY_RECHECK_INTERVAL, math.max(remaining, 0.1)))
+        end
+        return game.PlaceId == ARENA_PLACE_ID and not hasOtherPlayers()
     end
 
     local function scheduleReturnIfNeeded()
@@ -287,8 +417,8 @@ local function startArenaEmptyReturnMonitor()
         teleportScheduled = true
         task.spawn(function()
             waitForPlayerReady()
-            task.wait(3)
-            if game.PlaceId ~= ARENA_PLACE_ID then
+            if not confirmArenaStillEmpty() then
+                teleportScheduled = false
                 return
             end
             local configuredPlaceId, configuredJobId = getConfiguredTeleportTarget()
@@ -372,6 +502,39 @@ local function startAutoPrivateLobby()
         if not ok then
             warn(string.format("[AutoPrivateLobby] Failed to run teleport sequence: %s", tostring(err)))
         end
+    end
+
+    local function findActiveTargetPlayer()
+        for _, targetName in ipairs(TARGET_PLAYER_NAMES) do
+            local player = Players:FindFirstChild(targetName)
+            if player then
+                return player
+            end
+        end
+        return nil
+    end
+
+    local function waitForTargetPlayerPresence()
+        if #TARGET_PLAYER_NAMES == 0 then
+            return nil
+        end
+
+        local existing = findActiveTargetPlayer()
+        if existing then
+            return existing
+        end
+
+        print(string.format("[AutoPrivateLobby] Waiting for target players (%s) to join before configuring lobby.", table.concat(TARGET_PLAYER_NAMES, ", ")))
+
+        local targetPlayer = nil
+        while not targetPlayer do
+            local player = Players.PlayerAdded:Wait()
+            if TARGET_PLAYER_SET[player.Name] then
+                targetPlayer = player
+            end
+        end
+
+        return targetPlayer
     end
 
     local function ensureLobbyJobConsistency()
@@ -483,7 +646,7 @@ local function runNonLobbyFlow()
                     return
                 end
 
-                task.wait(2)
+                task.wait(1)
                 local events = waitForChildCritical(ReplicatedStorage, "Events", 8, "ArenaReturnEvents")
                 local returnEvent = events and waitForChildCritical(events, "ArenaReturnToLobby", 8, "ArenaReturnMissing")
                 if returnEvent then
@@ -502,7 +665,7 @@ local function runNonLobbyFlow()
     
     print("[AutoPrivateLobby] Lobby detected; starting automated private lobby sequence.")
     if game.PlaceId == ARENA_PLACE_ID then
-	task.wait(12)
+	task.wait(nonpvpwait)
         runNonLobbyFlow()
         return
     end
@@ -515,7 +678,11 @@ local function runNonLobbyFlow()
     if not ensureLobbyJobConsistency() then
         return
     end
-    task.wait(20)
+    local detectedTarget = waitForTargetPlayerPresence()
+    if detectedTarget then
+        print(string.format("[AutoPrivateLobby] Target player %s detected; continuing in %d seconds.", detectedTarget.Name, lobbywaits))
+    end
+    task.wait(lobbywaits)
     local eventsFolder = waitForChildCritical(ReplicatedStorage, "Events", 10, "LobbyEventsMissing")
     if not eventsFolder then
         return
